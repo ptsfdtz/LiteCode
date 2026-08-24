@@ -1,0 +1,13 @@
+[package]
+name = "litecode-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+litecode-protocol = { path = "../litecode-protocol" }
+
+[lints]
+workspace = true
+

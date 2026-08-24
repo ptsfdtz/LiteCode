@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+/apps/mobile/build/
+/apps/mobile/.metadata
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local.json
+

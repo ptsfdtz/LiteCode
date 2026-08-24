@@ -1,0 +1,106 @@
+//! Transport-independent messages exchanged by `LiteCode` clients and agents.
+
+use std::fmt;
+
+/// Version of the application-level protocol implemented by this crate.
+pub const PROTOCOL_VERSION: u16 = 1;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskId(String);
+
+impl TaskId {
+    /// Creates a non-empty task identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::EmptyIdentifier`] when the supplied value is blank.
+    pub fn new(value: impl Into<String>) -> Result<Self, ProtocolError> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err(ProtocolError::EmptyIdentifier);
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientCommand {
+    CreateTask {
+        task_id: TaskId,
+        workspace_id: String,
+        tool: String,
+        prompt: String,
+    },
+    SendInput {
+        task_id: TaskId,
+        input: String,
+    },
+    ResolveApproval {
+        task_id: TaskId,
+        approval_id: String,
+        decision: ApprovalDecision,
+    },
+    StopTask {
+        task_id: TaskId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalDecision {
+    ApproveOnce,
+    Reject,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentEvent {
+    TaskStarted {
+        task_id: TaskId,
+    },
+    OutputDelta {
+        task_id: TaskId,
+        text: String,
+    },
+    ApprovalRequired {
+        task_id: TaskId,
+        approval_id: String,
+        summary: String,
+    },
+    TaskCompleted {
+        task_id: TaskId,
+        summary: String,
+    },
+    TaskFailed {
+        task_id: TaskId,
+        message: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProtocolError {
+    EmptyIdentifier,
+}
+
+impl fmt::Display for ProtocolError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyIdentifier => formatter.write_str("identifier cannot be empty"),
+        }
+    }
+}
+
+impl std::error::Error for ProtocolError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_id_rejects_blank_values() {
+        assert_eq!(TaskId::new("  "), Err(ProtocolError::EmptyIdentifier));
+    }
+}
