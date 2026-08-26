@@ -46,7 +46,8 @@ Exit criteria: the same mobile build completes the MVP journey against every hos
 
 ## M4 - Product hardening
 
-- [ ] mDNS discovery and QR pairing.
+- [ ] mDNS discovery.
+- [x] QR pairing, secure client credentials, and certificate-pinned TLS transport.
 - [ ] Durable encrypted task metadata.
 - [ ] Device revocation and security audit view.
 - [ ] Tray/menu-bar configuration shell.

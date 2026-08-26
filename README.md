@@ -46,15 +46,21 @@ New-Item -ItemType Directory -Force test-workspaces/e2e
 cargo run -p litecode-agent -- serve --workspace test-workspaces/e2e
 ```
 
-Startup prints a single-use `litecode://pair` invitation. Exchange its secret at
-`POST /v1/pair`, then supply the returned device credential as an
-`Authorization: Bearer` header when opening `/v1/ws`. The endpoint rejects
-unauthenticated upgrades.
+Startup prints a single-use `litecode://pair` invitation. The Flutter client can scan
+or paste it, exchanges the secret at `POST /v1/pair`, stores the returned credential in
+the platform secure store, and supplies it as an `Authorization: Bearer` header when
+opening `/v1/ws`.
 
-The Flutter pairing screen and secure credential storage are the next client slice;
-the previous fixed unauthenticated Flutter connection is intentionally no longer
-accepted. The Agent still listens only on `127.0.0.1` because TLS and certificate
-pinning are required before LAN use.
+Plain transport remains loopback-only. For LAN development, use TLS and advertise a
+host or IP reachable by the phone:
+
+```powershell
+cargo run -p litecode-agent -- serve --workspace test-workspaces/e2e `
+  --bind 0.0.0.0:47831 --tls --advertise-host 192.168.1.10
+```
+
+The QR invitation pins the generated certificate fingerprint. Use `devices` and
+`revoke-device --device <ID>` to inspect or revoke paired clients.
 
 ### Flutter app
 

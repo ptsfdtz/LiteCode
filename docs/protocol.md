@@ -3,8 +3,9 @@
 ## Status
 
 Draft for protocol version 1. Rust types define task messages and the pairing exchange.
-The implemented loopback slice authenticates WebSocket upgrades; TLS and mobile QR
-handling are not yet implemented, so non-loopback binding remains prohibited.
+The Agent supports authenticated loopback transport and explicitly enabled TLS network
+transport. The Flutter client parses QR invitations, pins the advertised certificate,
+and stores paired credentials in the platform secure store.
 
 ## Transport
 
@@ -33,8 +34,9 @@ The QR payload uses the `litecode://pair` URI scheme and contains:
 | `fingerprint` | SHA-256 fingerprint of the Agent TLS certificate |
 | `secret` | Random, single-use pairing secret valid for five minutes |
 
-The current loopback implementation omits `fingerprint` and advertises an HTTP origin.
-Clients must reject that form for a non-loopback endpoint.
+Plain loopback invitations omit `fingerprint` and advertise an HTTP origin. TLS
+invitations include it. Clients reject plain non-loopback endpoints and malformed
+SHA-256 fingerprints.
 
 ## Pairing exchange
 
@@ -46,6 +48,9 @@ On success it returns `protocolVersion`, `agentId`, `deviceId`, and
 Errors use HTTP status `400` for protocol incompatibility, `401` for an invalid or used
 invitation, and `429` for a rate-limited source. Error bodies contain stable codes and
 never echo supplied values.
+
+WebSocket upgrades return `401` for missing, invalid, or revoked credentials and `429`
+after repeated authentication failures from the same source.
 
 ## Client commands
 

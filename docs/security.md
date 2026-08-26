@@ -42,14 +42,17 @@
   pinned by the client. Plain `http` and `ws` are permitted only on loopback.
 - Pairing failures are limited to five attempts per source per minute. Secrets and
   credentials must never appear in logs.
+- Authentication failures use the same per-source limit. Device registries and TLS
+  private keys are written with owner-only permissions on Unix; Windows relies on the
+  user profile directory ACL until the platform credential-store abstraction lands.
 
 The mechanism and rollout constraints are recorded in ADR-0003.
 
 ## Local development exception
 
-The initial M1 development slice was unauthenticated. The Agent now implements
-one-time pairing and authenticated WebSocket upgrades, but still enforces all of the
-following until TLS and mobile credential storage are complete:
+The initial M1 development slice was unauthenticated. Plain `http` and `ws` mode now
+implements one-time pairing and authenticated WebSocket upgrades, and still enforces
+all of the following:
 
 - binds only to an IP loopback address;
 - accepts only workspace ID `local` and tool ID `codex`;
@@ -57,9 +60,10 @@ following until TLS and mobile credential storage are complete:
 - starts Codex with `workspace-write` sandboxing and ephemeral session storage;
 - is not suitable for LAN or public network exposure.
 
-Removing the loopback restriction requires TLS with certificate pinning, mobile QR
-pairing and secure credential storage, working device revocation, and transport-level
-integration tests.
+Non-loopback binding requires the explicit `--tls` flag and an advertised host. TLS
+mode generates a per-installation self-signed identity, publishes its SHA-256
+fingerprint in the pairing invitation, and is accepted by the client only when that
+fingerprint matches. Device revocation rejects subsequent connection attempts.
 
 ## Explicit non-goals for the MVP
 
@@ -69,8 +73,8 @@ integration tests.
 
 ## Open security work
 
-- Certificate generation, rotation, and platform credential-store abstractions.
-- Device listing and revocation UX plus active-session invalidation.
+- Certificate rotation and host platform credential-store abstraction.
+- Device management UI plus active-session invalidation after revocation.
 - Exact approval risk classification.
 - Task event retention and secure deletion policy.
 

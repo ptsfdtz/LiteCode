@@ -31,12 +31,11 @@ After pairing, the client opens `wss://.../v1/ws` with the device credential in 
 commands and checks that the device has not been revoked. Revocation invalidates new
 connections immediately and closes existing sessions as soon as practical.
 
-The current implementation delivers the identity, one-time exchange, hashed device
-registry, rate limiting, and authenticated WebSocket upgrade on loopback. Its
-invitation deliberately has no TLS fingerprint and uses `http`/`ws`, so the existing
-non-loopback bind rejection remains mandatory. LAN binding may be enabled only after
-TLS, fingerprint pinning, secure credential storage, revocation commands, and mobile
-QR handling are implemented and tested together.
+The implementation delivers the identity, one-time exchange, hashed device registry,
+rate limiting, authenticated WebSocket upgrade, TLS identity, certificate pinning,
+mobile QR handling, secure client credential storage, and device revocation commands.
+Plain transport remains loopback-only. Non-loopback binding is available only with the
+explicit `--tls` option and an advertised host.
 
 ## Consequences
 
@@ -48,5 +47,5 @@ QR handling are implemented and tested together.
   pins their fingerprint; the operating-system public CA store is not the trust root.
 - Device registry migrations and certificate rotation require explicit compatibility
   handling.
-- ADR-0002 remains in force for network binding until all LAN prerequisites above are
-  complete.
+- ADR-0002 remains in force for plain transport; it does not permit non-loopback
+  `http` or `ws`.

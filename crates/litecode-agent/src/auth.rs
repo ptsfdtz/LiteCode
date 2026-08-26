@@ -6,6 +6,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::path::Path;
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -25,7 +28,8 @@ pub struct AuthService {
 struct AuthState {
     store: DeviceStore,
     invitation: PairingInvitation,
-    failures: HashMap<String, FailureBucket>,
+    pairing_failures: HashMap<String, FailureBucket>,
+    authentication_failures: HashMap<String, FailureBucket>,
 }
 
 #[derive(Debug)]
@@ -62,6 +66,13 @@ pub struct PairingResult {
     pub credential: String,
 }
 
+pub struct DeviceSummary {
+    pub id: String,
+    pub name: String,
+    pub created_at_unix: u64,
+    pub revoked: bool,
+}
+
 impl AuthService {
     pub fn load(store_path: PathBuf) -> Result<Self, String> {
         let store = if store_path.exists() {
@@ -80,7 +91,8 @@ impl AuthService {
             inner: Arc::new(Mutex::new(AuthState {
                 store,
                 invitation: new_invitation(),
-                failures: HashMap::new(),
+                pairing_failures: HashMap::new(),
+                authentication_failures: HashMap::new(),
             })),
             store_path: Arc::new(store_path),
         };
@@ -88,14 +100,19 @@ impl AuthService {
         Ok(service)
     }
 
-    pub fn invitation_uri(&self, endpoint: &str) -> String {
+    pub fn invitation_uri(&self, endpoint: &str, fingerprint: Option<&str>) -> String {
         let state = self.inner.lock().expect("auth mutex poisoned");
-        format!(
+        let mut invitation = format!(
             "litecode://pair?agent={}&endpoint={}&secret={}",
             state.store.agent_id,
             URL_SAFE_NO_PAD.encode(endpoint),
             state.invitation.secret
-        )
+        );
+        if let Some(fingerprint) = fingerprint {
+            invitation.push_str("&fingerprint=");
+            invitation.push_str(fingerprint);
+        }
+        invitation
     }
 
     pub fn pair(
@@ -105,7 +122,7 @@ impl AuthService {
         device_name: &str,
     ) -> Result<PairingResult, &'static str> {
         let mut state = self.inner.lock().expect("auth mutex poisoned");
-        if rate_limited(&mut state.failures, source) {
+        if rate_limited(&mut state.pairing_failures, source) {
             return Err("pairing_rate_limited");
         }
         let supplied_hash = hash(secret);
@@ -113,14 +130,14 @@ impl AuthService {
             && Instant::now() <= state.invitation.expires_at
             && bool::from(supplied_hash.ct_eq(&state.invitation.secret_hash));
         if !invitation_valid || device_name.trim().is_empty() || device_name.len() > 80 {
-            record_failure(&mut state.failures, source);
+            record_failure(&mut state.pairing_failures, source);
             return Err("invalid_pairing_request");
         }
 
         let credential = random_token(32);
         let device_id = random_token(16);
         state.invitation.used = true;
-        state.failures.remove(source);
+        state.pairing_failures.remove(source);
         state.store.devices.push(DeviceRecord {
             id: device_id.clone(),
             name: device_name.trim().to_owned(),
@@ -141,13 +158,53 @@ impl AuthService {
         Ok(result)
     }
 
-    pub fn authenticate(&self, credential: &str) -> bool {
+    pub fn authenticate(&self, source: &str, credential: &str) -> Result<bool, &'static str> {
         let supplied = URL_SAFE_NO_PAD.encode(hash(credential));
-        let state = self.inner.lock().expect("auth mutex poisoned");
-        state.store.devices.iter().any(|device| {
+        let mut state = self.inner.lock().expect("auth mutex poisoned");
+        if rate_limited(&mut state.authentication_failures, source) {
+            return Err("authentication_rate_limited");
+        }
+        let authenticated = state.store.devices.iter().any(|device| {
             !device.revoked
                 && bool::from(supplied.as_bytes().ct_eq(device.credential_hash.as_bytes()))
-        })
+        });
+        if authenticated {
+            state.authentication_failures.remove(source);
+        } else {
+            record_failure(&mut state.authentication_failures, source);
+        }
+        Ok(authenticated)
+    }
+
+    pub fn devices(&self) -> Vec<DeviceSummary> {
+        let state = self.inner.lock().expect("auth mutex poisoned");
+        state
+            .store
+            .devices
+            .iter()
+            .map(|device| DeviceSummary {
+                id: device.id.clone(),
+                name: device.name.clone(),
+                created_at_unix: device.created_at_unix,
+                revoked: device.revoked,
+            })
+            .collect()
+    }
+
+    pub fn revoke(&self, device_id: &str) -> Result<bool, String> {
+        let mut state = self.inner.lock().expect("auth mutex poisoned");
+        let Some(device) = state
+            .store
+            .devices
+            .iter_mut()
+            .find(|device| device.id == device_id)
+        else {
+            return Ok(false);
+        };
+        device.revoked = true;
+        drop(state);
+        self.persist()?;
+        Ok(true)
     }
 
     fn persist(&self) -> Result<(), String> {
@@ -161,9 +218,19 @@ impl AuthService {
         let temporary = self.store_path.with_extension("tmp");
         fs::write(&temporary, contents)
             .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
+        #[cfg(unix)]
+        restrict_file_permissions(&temporary)?;
         fs::rename(&temporary, self.store_path.as_ref())
             .map_err(|error| format!("cannot replace {}: {error}", self.store_path.display()))
     }
+}
+
+#[cfg(unix)]
+fn restrict_file_permissions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("cannot protect {}: {error}", path.display()))?;
+    Ok(())
 }
 
 fn new_invitation() -> PairingInvitation {
@@ -218,14 +285,14 @@ mod tests {
         let path = temporary_store("pairing");
         let service = AuthService::load(path.clone()).expect("loads store");
         let secret = service
-            .invitation_uri("ws://127.0.0.1")
+            .invitation_uri("ws://127.0.0.1", None)
             .split("secret=")
             .nth(1)
             .expect("secret in invitation")
             .to_owned();
         let paired = service.pair("local", &secret, "Test phone").expect("pairs");
 
-        assert!(service.authenticate(&paired.credential));
+        assert_eq!(service.authenticate("local", &paired.credential), Ok(true));
         assert_eq!(
             service.pair("local", &secret, "Second phone").err(),
             Some("invalid_pairing_request")
@@ -247,6 +314,24 @@ mod tests {
             service.pair("source", "wrong", "Phone").err(),
             Some("pairing_rate_limited")
         );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn revoked_device_can_no_longer_authenticate() {
+        let path = temporary_store("revoke");
+        let service = AuthService::load(path.clone()).expect("loads store");
+        let secret = service
+            .invitation_uri("ws://127.0.0.1", None)
+            .split("secret=")
+            .nth(1)
+            .expect("secret in invitation")
+            .to_owned();
+        let paired = service.pair("local", &secret, "Test phone").expect("pairs");
+
+        assert!(service.revoke(&paired.device_id).expect("revokes"));
+        assert_eq!(service.authenticate("local", &paired.credential), Ok(false));
+        assert!(service.devices()[0].revoked);
         let _ = fs::remove_file(path);
     }
 }

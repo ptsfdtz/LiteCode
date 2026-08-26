@@ -1,6 +1,12 @@
 mod auth;
+mod tls;
 
-use std::{net::SocketAddr, path::PathBuf, process::ExitCode, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    sync::Arc,
+};
 
 use axum::{
     Json, Router,
@@ -51,9 +57,29 @@ async fn run() -> Result<(), String> {
         Some("serve") => {
             let workspace = required_flag(&arguments, "--workspace")?;
             let bind = optional_flag(&arguments, "--bind").unwrap_or(DEFAULT_BIND);
+            let tls = has_flag(&arguments, "--tls");
+            let advertise_host = optional_flag(&arguments, "--advertise-host");
             let state_dir = optional_flag(&arguments, "--state-dir")
                 .map_or_else(default_state_dir, PathBuf::from);
-            serve(PathBuf::from(workspace), bind, state_dir).await
+            serve(
+                PathBuf::from(workspace),
+                bind,
+                state_dir,
+                tls,
+                advertise_host,
+            )
+            .await
+        }
+        Some("devices") => {
+            let state_dir = optional_flag(&arguments, "--state-dir")
+                .map_or_else(default_state_dir, PathBuf::from);
+            print_devices(&state_dir)
+        }
+        Some("revoke-device") => {
+            let device_id = required_flag(&arguments, "--device")?;
+            let state_dir = optional_flag(&arguments, "--state-dir")
+                .map_or_else(default_state_dir, PathBuf::from);
+            revoke_device(&state_dir, device_id)
         }
         Some("version" | "--version" | "-V") => {
             println!("litecode-agent {}", env!("CARGO_PKG_VERSION"));
@@ -79,6 +105,10 @@ fn optional_flag<'a>(arguments: &'a [String], name: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+fn has_flag(arguments: &[String], name: &str) -> bool {
+    arguments.iter().any(|value| value == name)
+}
+
 fn default_state_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .or_else(|| std::env::var_os("XDG_STATE_HOME"))
@@ -86,17 +116,57 @@ fn default_state_dir() -> PathBuf {
         .join("LiteCode")
 }
 
-async fn serve(workspace: PathBuf, bind: &str, state_dir: PathBuf) -> Result<(), String> {
+fn print_devices(state_dir: &Path) -> Result<(), String> {
+    let auth = auth::AuthService::load(state_dir.join("devices.json"))?;
+    let devices = auth.devices();
+    if devices.is_empty() {
+        println!("No paired devices.");
+        return Ok(());
+    }
+    for device in devices {
+        let state = if device.revoked { "revoked" } else { "active" };
+        println!(
+            "{}\t{}\t{}\tcreated {}",
+            device.id, device.name, state, device.created_at_unix
+        );
+    }
+    Ok(())
+}
+
+fn revoke_device(state_dir: &Path, device_id: &str) -> Result<(), String> {
+    let auth = auth::AuthService::load(state_dir.join("devices.json"))?;
+    if !auth.revoke(device_id)? {
+        return Err(format!("unknown device: {device_id}"));
+    }
+    println!("Revoked device {device_id}");
+    Ok(())
+}
+
+async fn serve(
+    workspace: PathBuf,
+    bind: &str,
+    state_dir: PathBuf,
+    tls_enabled: bool,
+    advertised_host_override: Option<&str>,
+) -> Result<(), String> {
     let workspace = workspace
         .canonicalize()
         .map_err(|error| format!("invalid workspace {}: {error}", workspace.display()))?;
     let address: SocketAddr = bind
         .parse()
         .map_err(|error| format!("invalid bind address {bind}: {error}"))?;
-    if !address.ip().is_loopback() {
-        return Err(
-            "LAN binding requires TLS and is not implemented; use a loopback address".into(),
-        );
+    if !address.ip().is_loopback() && !tls_enabled {
+        return Err("non-loopback binding requires --tls".into());
+    }
+    let advertised_host = advertised_host_override.unwrap_or_else(|| {
+        if address.ip().is_unspecified() {
+            ""
+        } else {
+            bind.rsplit_once(':').map_or(bind, |(host, _)| host)
+        }
+    });
+    if advertised_host.is_empty() {
+        return Err("--advertise-host is required for an unspecified bind address".into());
     }
 
     let auth = auth::AuthService::load(state_dir.join("devices.json"))?;
@@ -109,21 +179,36 @@ async fn serve(workspace: PathBuf, bind: &str, state_dir: PathBuf) -> Result<(),
             auth: auth.clone(),
             workspace: Arc::new(workspace.clone()),
         });
-    let listener = tokio::net::TcpListener::bind(address)
-        .await
-        .map_err(|error| format!("cannot bind {address}: {error}"))?;
-    println!("LiteCode agent listening on ws://{address}/v1/ws");
     println!("Authorized workspace: {}", workspace.display());
-    println!(
-        "Pairing invitation (valid once for 5 minutes): {}",
-        auth.invitation_uri(&format!("http://{address}"))
-    );
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .map_err(|error| format!("server failed: {error}"))
+    if tls_enabled {
+        let identity = tls::load_or_create(&state_dir, advertised_host).await?;
+        let endpoint = format!("https://{advertised_host}:{}", address.port());
+        println!("LiteCode agent listening on {endpoint}/v1/ws");
+        println!(
+            "Pairing invitation (valid once for 5 minutes): {}",
+            auth.invitation_uri(&endpoint, Some(&identity.fingerprint))
+        );
+        axum_server::bind_rustls(address, identity.config)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .map_err(|error| format!("TLS server failed: {error}"))
+    } else {
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .map_err(|error| format!("cannot bind {address}: {error}"))?;
+        let endpoint = format!("http://{advertised_host}:{}", address.port());
+        println!("LiteCode agent listening on {endpoint}/v1/ws");
+        println!(
+            "Pairing invitation (valid once for 5 minutes): {}",
+            auth.invitation_uri(&endpoint, None)
+        );
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .map_err(|error| format!("server failed: {error}"))
+    }
 }
 
 async fn health() -> &'static str {
@@ -133,10 +218,15 @@ async fn health() -> &'static str {
 async fn websocket_upgrade(
     upgrade: WebSocketUpgrade,
     State(state): State<AppState>,
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let credential = bearer_credential(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    if !state.auth.authenticate(credential) {
+    let credential = bearer_credential(&headers).unwrap_or_default();
+    let authenticated = state
+        .auth
+        .authenticate(&source.ip().to_string(), credential)
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+    if !authenticated {
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(upgrade.on_upgrade(move |socket| handle_socket(socket, state)))
@@ -381,8 +471,10 @@ fn print_status() {
 fn print_help() {
     println!("Usage:");
     println!("  litecode-agent status");
+    println!("  litecode-agent devices [--state-dir <PATH>]");
+    println!("  litecode-agent revoke-device --device <ID> [--state-dir <PATH>]");
     println!(
-        "  litecode-agent serve --workspace <PATH> [--bind 127.0.0.1:47831] [--state-dir <PATH>]"
+        "  litecode-agent serve --workspace <PATH> [--bind <IP:PORT>] [--tls] [--advertise-host <HOST>] [--state-dir <PATH>]"
     );
 }
 

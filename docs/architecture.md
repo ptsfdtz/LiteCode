@@ -31,9 +31,9 @@ supervision. It continues running tasks when the phone disconnects.
 
 The current M1 slice provides `GET /health`, a one-time pairing exchange at
 `POST /v1/pair`, and a bearer-authenticated WebSocket endpoint at `/v1/ws`. It owns a
-stable Agent ID and a hashed device registry. The server still rejects non-loopback
-bind addresses until TLS identity, certificate pinning, mobile secure storage, and
-device revocation are implemented.
+stable Agent ID, TLS identity, and hashed device registry. Plain transport is restricted
+to loopback; explicitly enabled TLS transport may bind to the LAN and advertises a
+certificate fingerprint for client pinning.
 
 ### Core library
 
@@ -81,9 +81,9 @@ Flutter Windows client
 ```
 
 This slice validates component boundaries, process streaming, host identity, one-time
-pairing, and upgrade authentication. It does not claim encrypted LAN transport, mobile
-QR handling, secure platform credential storage, revocation, task persistence,
-approval, or reconnect guarantees planned for the networked MVP.
+pairing, upgrade authentication, encrypted LAN transport, mobile QR handling, secure
+client credential storage, and revocation of new sessions. It does not yet provide
+mDNS, active-session invalidation, task persistence, approval, or reconnect guarantees.
 
 ## Planned dependency direction
 

@@ -2,16 +2,27 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+
+import 'pairing.dart';
 
 void main() {
   runApp(const LiteCodeApp());
 }
 
 class LiteCodeApp extends StatelessWidget {
-  const LiteCodeApp({super.key, this.autoConnect = true});
+  const LiteCodeApp({
+    super.key,
+    this.autoConnect = true,
+    this.credentialStore = const SecureAgentCredentialStore(),
+    this.pairingClient = const PairingClient(),
+  });
 
   final bool autoConnect;
+  final AgentCredentialStore credentialStore;
+  final PairingClient pairingClient;
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +50,244 @@ class LiteCodeApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: TaskHomePage(autoConnect: autoConnect),
+      home: _AppHome(
+        autoConnect: autoConnect,
+        credentialStore: credentialStore,
+        pairingClient: pairingClient,
+      ),
+    );
+  }
+}
+
+class _AppHome extends StatefulWidget {
+  const _AppHome({
+    required this.autoConnect,
+    required this.credentialStore,
+    required this.pairingClient,
+  });
+
+  final bool autoConnect;
+  final AgentCredentialStore credentialStore;
+  final PairingClient pairingClient;
+
+  @override
+  State<_AppHome> createState() => _AppHomeState();
+}
+
+class _AppHomeState extends State<_AppHome> {
+  PairedAgent? _agent;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    PairedAgent? agent;
+    try {
+      agent = await widget.credentialStore.read();
+    } on Object {
+      agent = null;
+    }
+    if (!mounted) return;
+    setState(() {
+      _agent = agent;
+      _loading = false;
+    });
+  }
+
+  Future<void> _paired(PairedAgent agent) async {
+    await widget.credentialStore.write(agent);
+    if (mounted) setState(() => _agent = agent);
+  }
+
+  Future<void> _forget() async {
+    await widget.credentialStore.clear();
+    if (mounted) setState(() => _agent = null);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    final agent = _agent;
+    if (agent == null) {
+      return PairDevicePage(client: widget.pairingClient, onPaired: _paired);
+    }
+    return TaskHomePage(
+      agent: agent,
+      autoConnect: widget.autoConnect,
+      onForgetDevice: _forget,
+    );
+  }
+}
+
+class PairDevicePage extends StatefulWidget {
+  const PairDevicePage({
+    super.key,
+    required this.client,
+    required this.onPaired,
+  });
+
+  final PairingClient client;
+  final Future<void> Function(PairedAgent) onPaired;
+
+  @override
+  State<PairDevicePage> createState() => _PairDevicePageState();
+}
+
+class _PairDevicePageState extends State<PairDevicePage> {
+  final _invitationController = TextEditingController();
+  bool _pairing = false;
+  String? _error;
+
+  bool get _canScan => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+
+  Future<void> _pair(String value) async {
+    if (_pairing || value.trim().isEmpty) return;
+    setState(() {
+      _pairing = true;
+      _error = null;
+    });
+    try {
+      final invitation = PairingInvitation.parse(value);
+      final agent = await widget.client.pair(invitation, _deviceName());
+      await widget.onPaired(agent);
+    } on FormatException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+    } on PairingException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+    } on Object {
+      if (mounted) setState(() => _error = 'Could not reach the Agent.');
+    } finally {
+      if (mounted) setState(() => _pairing = false);
+    }
+  }
+
+  String _deviceName() {
+    if (kIsWeb) return 'Web client';
+    if (Platform.isIOS) return 'iPhone';
+    if (Platform.isAndroid) return 'Android phone';
+    return '${Platform.operatingSystem} client';
+  }
+
+  Future<void> _scan() async {
+    final invitation = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const _ScannerPage()),
+    );
+    if (invitation != null) {
+      _invitationController.text = invitation;
+      await _pair(invitation);
+    }
+  }
+
+  @override
+  void dispose() {
+    _invitationController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('LiteCode')),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Icon(Icons.devices_rounded, size: 42, color: Color(0xFF176B5B)),
+                  const SizedBox(height: 18),
+                  Text('Pair a computer', style: Theme.of(context).textTheme.headlineSmall),
+                  const SizedBox(height: 20),
+                  if (_canScan) ...[
+                    SizedBox(
+                      height: 48,
+                      child: FilledButton.icon(
+                        onPressed: _pairing ? null : _scan,
+                        icon: const Icon(Icons.qr_code_scanner_rounded),
+                        label: const Text('Scan pairing code'),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    const Row(
+                      children: [
+                        Expanded(child: Divider()),
+                        Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 12),
+                          child: Text('or paste invitation'),
+                        ),
+                        Expanded(child: Divider()),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                  ],
+                  TextField(
+                    controller: _invitationController,
+                    enabled: !_pairing,
+                    minLines: 2,
+                    maxLines: 4,
+                    autocorrect: false,
+                    decoration: const InputDecoration(labelText: 'Pairing invitation'),
+                  ),
+                  if (_error != null) ...[
+                    const SizedBox(height: 12),
+                    _ErrorBanner(message: _error!),
+                  ],
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    height: 48,
+                    child: FilledButton.icon(
+                      onPressed: _pairing ? null : () => _pair(_invitationController.text),
+                      icon: _pairing
+                          ? const SizedBox.square(
+                              dimension: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.link_rounded),
+                      label: Text(_pairing ? 'Pairing' : 'Pair device'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ScannerPage extends StatefulWidget {
+  const _ScannerPage();
+
+  @override
+  State<_ScannerPage> createState() => _ScannerPageState();
+}
+
+class _ScannerPageState extends State<_ScannerPage> {
+  bool _found = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Scan pairing code')),
+      body: MobileScanner(
+        onDetect: (capture) {
+          if (_found) return;
+          final value = capture.barcodes.firstOrNull?.rawValue;
+          if (value == null || !value.startsWith('litecode://pair?')) return;
+          _found = true;
+          Navigator.of(context).pop(value);
+        },
+      ),
     );
   }
 }
@@ -47,8 +295,15 @@ class LiteCodeApp extends StatelessWidget {
 enum AgentConnection { connecting, connected, disconnected }
 
 class TaskHomePage extends StatefulWidget {
-  const TaskHomePage({super.key, this.autoConnect = true});
+  const TaskHomePage({
+    super.key,
+    required this.agent,
+    required this.onForgetDevice,
+    this.autoConnect = true,
+  });
 
+  final PairedAgent agent;
+  final VoidCallback onForgetDevice;
   final bool autoConnect;
 
   @override
@@ -56,8 +311,6 @@ class TaskHomePage extends StatefulWidget {
 }
 
 class _TaskHomePageState extends State<TaskHomePage> {
-  static const _agentUri = 'ws://127.0.0.1:47831/v1/ws';
-
   final _promptController = TextEditingController(
     text: 'Create a file named litecode-e2e.txt containing exactly: '
         'Flutter -> Agent -> Codex works',
@@ -87,7 +340,13 @@ class _TaskHomePageState extends State<TaskHomePage> {
       _error = null;
     });
     try {
-      final socket = await WebSocket.connect(_agentUri);
+      final socket = await WebSocket.connect(
+        widget.agent.websocketUri.toString(),
+        headers: <String, dynamic>{
+          HttpHeaders.authorizationHeader: 'Bearer ${widget.agent.credential}',
+        },
+        customClient: createPinnedHttpClient(widget.agent.fingerprint),
+      );
       if (!mounted) {
         await socket.close();
         return;
@@ -218,6 +477,17 @@ class _TaskHomePageState extends State<TaskHomePage> {
               onReconnect: _connect,
             ),
           ),
+          PopupMenuButton<String>(
+            tooltip: 'Device options',
+            icon: const Icon(Icons.more_vert),
+            onSelected: (value) {
+              if (value == 'forget') widget.onForgetDevice();
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'forget', child: Text('Forget this computer')),
+            ],
+          ),
+          const SizedBox(width: 8),
         ],
       ),
       body: SafeArea(
