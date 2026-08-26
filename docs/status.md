@@ -34,10 +34,13 @@ M1 - Local vertical slice
 - Added a loopback-only Agent pairing interface with host and transport details, a
   scannable QR invitation, a five-minute countdown, and invitation regeneration and
   cancellation controls.
+- Added protocol version 2 task-event sequencing, Agent-side in-memory event retention,
+  `resume_events` replay, and Flutter automatic reconnect with bounded backoff,
+  duplicate suppression, and actionable connection errors.
 
 ## Current focus
 
-- Add durable task events and reconnect replay.
+- Add follow-up task input, cancellation, and approval handling.
 - Add mDNS discovery and invalidate active sessions immediately after device revocation.
 
 ## Blockers
@@ -46,8 +49,9 @@ M1 - Local vertical slice
 
 ## Next actions
 
-1. Implement reconnect/event replay behavior.
-2. Add mDNS discovery and active-session revocation.
-3. Add host-side workspace configuration and capability discovery.
-4. Add explicit task cancellation and approval handling.
-5. Validate native pairing and secure storage on Android and iOS devices.
+1. Add explicit follow-up input, task cancellation, and approval handling.
+2. Add host-side workspace configuration and capability discovery.
+3. Add mDNS discovery and active-session revocation.
+4. Persist task state and events across Agent restarts.
+5. Validate native pairing and secure storage on Android and iOS devices when suitable
+   hardware is available.

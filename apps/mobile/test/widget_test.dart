@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:litecode_mobile/main.dart';
 import 'package:litecode_mobile/pairing.dart';
@@ -20,10 +21,7 @@ void main() {
     WidgetTester tester,
   ) async {
     await tester.pumpWidget(
-      LiteCodeApp(
-        autoConnect: false,
-        credentialStore: MemoryCredentialStore(),
-      ),
+      LiteCodeApp(autoConnect: false, credentialStore: MemoryCredentialStore()),
     );
     await tester.pumpAndSettle();
 
@@ -48,5 +46,34 @@ void main() {
     expect(find.text('Task'), findsOneWidget);
     expect(find.text('Run task'), findsOneWidget);
     expect(find.text('No task activity'), findsOneWidget);
+    expect(find.text('Agent offline'), findsOneWidget);
+    expect(
+      tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,
+      isNull,
+    );
+  });
+
+  testWidgets('task screen fits a narrow Windows-sized viewport', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final store = MemoryCredentialStore()
+      ..agent = PairedAgent(
+        agentId: 'agent',
+        deviceId: 'device',
+        endpoint: Uri.parse('http://127.0.0.1:47831'),
+        credential: 'credential',
+      );
+
+    await tester.pumpWidget(
+      LiteCodeApp(autoConnect: false, credentialStore: store),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Agent offline'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }

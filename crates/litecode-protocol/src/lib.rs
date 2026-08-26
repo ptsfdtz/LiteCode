@@ -5,7 +5,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Version of the application-level protocol implemented by this crate.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +69,10 @@ pub enum ClientCommand {
     StopTask {
         task_id: TaskId,
     },
+    ResumeEvents {
+        task_id: TaskId,
+        after_sequence: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -83,22 +87,27 @@ pub enum ApprovalDecision {
 pub enum AgentEvent {
     TaskStarted {
         task_id: TaskId,
+        sequence: u64,
     },
     OutputDelta {
         task_id: TaskId,
+        sequence: u64,
         text: String,
     },
     ApprovalRequired {
         task_id: TaskId,
+        sequence: u64,
         approval_id: String,
         summary: String,
     },
     TaskCompleted {
         task_id: TaskId,
+        sequence: u64,
         summary: String,
     },
     TaskFailed {
         task_id: TaskId,
+        sequence: u64,
         message: String,
     },
 }
@@ -152,8 +161,35 @@ mod tests {
 
         let json = serde_json::to_string(&request).expect("serializes pairing request");
 
-        assert!(json.contains(r#""protocolVersion":1"#));
+        assert!(json.contains(r#""protocolVersion":2"#));
         assert!(json.contains(r#""pairingSecret":"one-time-secret""#));
         assert!(json.contains(r#""deviceName":"Test phone""#));
+    }
+
+    #[test]
+    fn resume_events_uses_the_wire_contract() {
+        let command = ClientCommand::ResumeEvents {
+            task_id: TaskId::new("task-1").expect("valid task id"),
+            after_sequence: 7,
+        };
+
+        let json = serde_json::to_string(&command).expect("serializes resume command");
+
+        assert_eq!(
+            json,
+            r#"{"type":"resume_events","task_id":"task-1","after_sequence":7}"#
+        );
+    }
+
+    #[test]
+    fn task_events_include_their_sequence() {
+        let event = AgentEvent::TaskStarted {
+            task_id: TaskId::new("task-1").expect("valid task id"),
+            sequence: 1,
+        };
+
+        let json = serde_json::to_string(&event).expect("serializes event");
+
+        assert!(json.contains(r#""sequence":1"#));
     }
 }

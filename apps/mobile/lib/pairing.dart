@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-const protocolVersion = 1;
+const protocolVersion = 2;
 
 class PairingInvitation {
   const PairingInvitation({

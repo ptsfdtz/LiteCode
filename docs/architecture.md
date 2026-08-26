@@ -42,6 +42,13 @@ the LAN listener does not become an unauthenticated administration interface. Pa
 state remains owned by the same authorization service used by `POST /v1/pair`; there is
 no second invitation store or alternate authentication path.
 
+Task processes publish sequenced events to an Agent-owned in-memory event store rather
+than to one WebSocket connection. Authenticated sessions subscribe to live events and
+can request events after their last accepted sequence. This keeps task execution and
+event capture alive through a temporary client disconnect. Flutter reconnects with
+bounded backoff, requests the missing sequence range, buffers out-of-order arrivals,
+and suppresses duplicates. Restart persistence is not part of this slice.
+
 ### Core library
 
 Contains platform-independent workspace and task rules. It does not depend on network,
@@ -90,8 +97,9 @@ Flutter Windows client
 This slice validates component boundaries, process streaming, host identity, one-time
 pairing, upgrade authentication, encrypted LAN transport, mobile QR handling, secure
 client credential storage, a local host pairing interface, and revocation of new
-sessions. It does not yet provide device management UI, mDNS, active-session
-invalidation, task persistence, approval, or reconnect guarantees.
+sessions. It now provides reconnect and replay guarantees while the Agent process
+remains running. It does not yet provide device management UI, mDNS, active-session
+invalidation, restart persistence, approval, or cancellation.
 
 ## Planned dependency direction
 

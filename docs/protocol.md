@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft for protocol version 1. Rust types define task messages and the pairing exchange.
+Draft for protocol version 2. Rust types define task messages and the pairing exchange.
 The Agent supports authenticated loopback transport and explicitly enabled TLS network
 transport. The Flutter client parses QR invitations, pins the advertised certificate,
 and stores paired credentials in the platform secure store.
@@ -18,10 +18,12 @@ and stores paired credentials in the platform secure store.
 ## Envelope
 
 The local slice currently sends tagged command and event objects directly. Versioned
-envelopes, message identifiers, and replay sequences remain required before LAN use.
+envelopes and message identifiers remain required before protocol compatibility is
+considered stable.
 
-Events additionally include `taskId` and a monotonically increasing `sequence` when
-they belong to a task.
+Every task event includes `task_id` and a monotonically increasing `sequence`, starting
+at 1 independently for each task. Clients discard duplicate sequences and buffer gaps
+until replay supplies the missing events.
 
 ## Pairing invitation
 
@@ -80,6 +82,14 @@ after repeated authentication failures from the same source.
 | `resolve_approval` | Approve once or reject a pending operation |
 | `stop_task` | Request graceful task termination |
 | `resume_events` | Replay task events after a known sequence |
+
+`resume_events` contains `task_id` and `after_sequence`. The Agent returns retained
+events for that task whose sequence is greater than `after_sequence`, in ascending
+order. Live delivery can overlap replay, so clients must de-duplicate and restore
+sequence order. An unknown task or a cursor at the latest event produces no events.
+
+The current Agent retains task events only in memory. Temporary WebSocket disconnects
+do not stop the task or lose events, but restarting the Agent clears replay history.
 
 ## Agent events
 

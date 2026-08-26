@@ -175,9 +175,9 @@ class _PairDevicePageState extends State<PairDevicePage> {
   }
 
   Future<void> _scan() async {
-    final invitation = await Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => const _ScannerPage()),
-    );
+    final invitation = await Navigator.of(
+      context,
+    ).push<String>(MaterialPageRoute(builder: (_) => const _ScannerPage()));
     if (invitation != null) {
       _invitationController.text = invitation;
       await _pair(invitation);
@@ -203,9 +203,16 @@ class _PairDevicePageState extends State<PairDevicePage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Icon(Icons.devices_rounded, size: 42, color: Color(0xFF176B5B)),
+                  const Icon(
+                    Icons.devices_rounded,
+                    size: 42,
+                    color: Color(0xFF176B5B),
+                  ),
                   const SizedBox(height: 18),
-                  Text('Pair a computer', style: Theme.of(context).textTheme.headlineSmall),
+                  Text(
+                    'Pair a computer',
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
                   const SizedBox(height: 20),
                   if (_canScan) ...[
                     SizedBox(
@@ -235,7 +242,9 @@ class _PairDevicePageState extends State<PairDevicePage> {
                     minLines: 2,
                     maxLines: 4,
                     autocorrect: false,
-                    decoration: const InputDecoration(labelText: 'Pairing invitation'),
+                    decoration: const InputDecoration(
+                      labelText: 'Pairing invitation',
+                    ),
                   ),
                   if (_error != null) ...[
                     const SizedBox(height: 12),
@@ -245,7 +254,9 @@ class _PairDevicePageState extends State<PairDevicePage> {
                   SizedBox(
                     height: 48,
                     child: FilledButton.icon(
-                      onPressed: _pairing ? null : () => _pair(_invitationController.text),
+                      onPressed: _pairing
+                          ? null
+                          : () => _pair(_invitationController.text),
                       icon: _pairing
                           ? const SizedBox.square(
                               dimension: 16,
@@ -292,7 +303,7 @@ class _ScannerPageState extends State<_ScannerPage> {
   }
 }
 
-enum AgentConnection { connecting, connected, disconnected }
+enum AgentConnection { connecting, reconnecting, connected, disconnected }
 
 class TaskHomePage extends StatefulWidget {
   const TaskHomePage({
@@ -312,16 +323,22 @@ class TaskHomePage extends StatefulWidget {
 
 class _TaskHomePageState extends State<TaskHomePage> {
   final _promptController = TextEditingController(
-    text: 'Create a file named litecode-e2e.txt containing exactly: '
+    text:
+        'Create a file named litecode-e2e.txt containing exactly: '
         'Flutter -> Agent -> Codex works',
   );
   final _outputController = ScrollController();
   final List<String> _output = <String>[];
   WebSocket? _socket;
   StreamSubscription<dynamic>? _subscription;
+  Timer? _reconnectTimer;
   AgentConnection _connection = AgentConnection.disconnected;
+  int _reconnectAttempt = 0;
+  bool _connecting = false;
   bool _running = false;
   String? _error;
+  String? _activeTaskId;
+  final OrderedEventBuffer _eventBuffer = OrderedEventBuffer();
 
   @override
   void initState() {
@@ -332,11 +349,21 @@ class _TaskHomePageState extends State<TaskHomePage> {
   }
 
   Future<void> _connect() async {
+    if (_connecting) return;
+    _connecting = true;
+    _reconnectTimer?.cancel();
     await _subscription?.cancel();
     await _socket?.close();
-    if (!mounted) return;
+    _subscription = null;
+    _socket = null;
+    if (!mounted) {
+      _connecting = false;
+      return;
+    }
     setState(() {
-      _connection = AgentConnection.connecting;
+      _connection = _reconnectAttempt == 0
+          ? AgentConnection.connecting
+          : AgentConnection.reconnecting;
       _error = null;
     });
     try {
@@ -355,31 +382,72 @@ class _TaskHomePageState extends State<TaskHomePage> {
       _subscription = socket.listen(
         _handleMessage,
         onDone: _handleDisconnect,
-        onError: (Object error) => _handleDisconnect(error.toString()),
+        onError: _handleDisconnect,
         cancelOnError: true,
       );
+      _reconnectAttempt = 0;
+      _connecting = false;
       setState(() => _connection = AgentConnection.connected);
-    } on Object {
+      final activeTaskId = _activeTaskId;
+      if (activeTaskId != null) {
+        socket.add(
+          jsonEncode(<String, dynamic>{
+            'type': 'resume_events',
+            'task_id': activeTaskId,
+            'after_sequence': _eventBuffer.lastSequence,
+          }),
+        );
+      }
+    } on Object catch (error) {
       if (!mounted) return;
+      _connecting = false;
       setState(() {
         _connection = AgentConnection.disconnected;
-        _error = 'Agent is not available on this computer.';
+        _error = connectionErrorMessage(error);
       });
+      _scheduleReconnect();
     }
   }
 
-  void _handleDisconnect([String? message]) {
+  void _handleDisconnect([Object? error]) {
     if (!mounted) return;
+    _subscription = null;
+    _socket = null;
     setState(() {
       _connection = AgentConnection.disconnected;
-      _running = false;
-      _error = message ?? 'Agent connection closed.';
+      _error = error == null
+          ? 'Agent connection closed. Reconnecting...'
+          : connectionErrorMessage(error);
     });
+    _scheduleReconnect();
+  }
+
+  void _scheduleReconnect() {
+    if (!widget.autoConnect ||
+        !mounted ||
+        _connecting ||
+        _reconnectTimer?.isActive == true) {
+      return;
+    }
+    final delay = reconnectDelay(_reconnectAttempt);
+    _reconnectAttempt++;
+    _reconnectTimer = Timer(delay, _connect);
   }
 
   void _handleMessage(dynamic data) {
     if (data is! String) return;
     final event = jsonDecode(data) as Map<String, dynamic>;
+    final taskId = event['task_id'] as String?;
+    final sequence = event['sequence'] as int?;
+    if (taskId == null || sequence == null) return;
+    if (_activeTaskId != null && taskId != _activeTaskId) return;
+    _activeTaskId ??= taskId;
+    for (final next in _eventBuffer.add(sequence, event)) {
+      _applyEvent(next);
+    }
+  }
+
+  void _applyEvent(Map<String, dynamic> event) {
     final type = event['type'] as String? ?? 'unknown';
     switch (type) {
       case 'task_started':
@@ -434,10 +502,14 @@ class _TaskHomePageState extends State<TaskHomePage> {
 
   void _runTask() {
     final prompt = _promptController.text.trim();
-    if (_connection != AgentConnection.connected || prompt.isEmpty || _running) {
+    if (_connection != AgentConnection.connected ||
+        prompt.isEmpty ||
+        _running) {
       return;
     }
     final taskId = 'task-${DateTime.now().microsecondsSinceEpoch}';
+    _activeTaskId = taskId;
+    _eventBuffer.reset();
     _socket?.add(
       jsonEncode(<String, dynamic>{
         'type': 'create_task',
@@ -457,6 +529,7 @@ class _TaskHomePageState extends State<TaskHomePage> {
 
   @override
   void dispose() {
+    _reconnectTimer?.cancel();
     unawaited(_subscription?.cancel());
     unawaited(_socket?.close());
     _promptController.dispose();
@@ -484,7 +557,10 @@ class _TaskHomePageState extends State<TaskHomePage> {
               if (value == 'forget') widget.onForgetDevice();
             },
             itemBuilder: (_) => const [
-              PopupMenuItem(value: 'forget', child: Text('Forget this computer')),
+              PopupMenuItem(
+                value: 'forget',
+                child: Text('Forget this computer'),
+              ),
             ],
           ),
           const SizedBox(width: 8),
@@ -516,13 +592,17 @@ class _TaskHomePageState extends State<TaskHomePage> {
                       width: 132,
                       height: 44,
                       child: FilledButton.icon(
-                        onPressed: _connection == AgentConnection.connected && !_running
+                        onPressed:
+                            _connection == AgentConnection.connected &&
+                                !_running
                             ? _runTask
                             : null,
                         icon: _running
                             ? const SizedBox.square(
                                 dimension: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
                               )
                             : const Icon(Icons.play_arrow_rounded),
                         label: Text(_running ? 'Running' : 'Run task'),
@@ -556,7 +636,8 @@ class _TaskHomePageState extends State<TaskHomePage> {
                               controller: _outputController,
                               padding: const EdgeInsets.all(16),
                               itemCount: _output.length,
-                              separatorBuilder: (_, _) => const SizedBox(height: 8),
+                              separatorBuilder: (_, _) =>
+                                  const SizedBox(height: 8),
                               itemBuilder: (context, index) => SelectableText(
                                 _output[index],
                                 style: const TextStyle(
@@ -580,7 +661,10 @@ class _TaskHomePageState extends State<TaskHomePage> {
 }
 
 class _ConnectionStatus extends StatelessWidget {
-  const _ConnectionStatus({required this.connection, required this.onReconnect});
+  const _ConnectionStatus({
+    required this.connection,
+    required this.onReconnect,
+  });
 
   final AgentConnection connection;
   final VoidCallback onReconnect;
@@ -590,11 +674,14 @@ class _ConnectionStatus extends StatelessWidget {
     final connected = connection == AgentConnection.connected;
     final label = switch (connection) {
       AgentConnection.connecting => 'Connecting',
+      AgentConnection.reconnecting => 'Reconnecting',
       AgentConnection.connected => 'Agent online',
       AgentConnection.disconnected => 'Agent offline',
     };
     return TextButton.icon(
-      onPressed: connection == AgentConnection.disconnected ? onReconnect : null,
+      onPressed: connection == AgentConnection.disconnected
+          ? onReconnect
+          : null,
       icon: Icon(
         connected ? Icons.check_circle : Icons.circle_outlined,
         size: 17,
@@ -602,6 +689,61 @@ class _ConnectionStatus extends StatelessWidget {
       ),
       label: Text(label),
     );
+  }
+}
+
+Duration reconnectDelay(int attempt) {
+  const delays = <Duration>[
+    Duration(seconds: 1),
+    Duration(seconds: 2),
+    Duration(seconds: 4),
+    Duration(seconds: 8),
+    Duration(seconds: 15),
+  ];
+  return delays[attempt.clamp(0, delays.length - 1)];
+}
+
+String connectionErrorMessage(Object error) {
+  final message = error.toString().toLowerCase();
+  if (message.contains('401') || message.contains('403')) {
+    return 'This device is no longer authorized. Pair it again.';
+  }
+  if (message.contains('429')) {
+    return 'Too many connection attempts. Retrying shortly.';
+  }
+  if (error is HandshakeException ||
+      message.contains('certificate') ||
+      message.contains('handshake')) {
+    return 'The Agent certificate could not be verified. Pair it again.';
+  }
+  if (error is SocketException ||
+      message.contains('connection refused') ||
+      message.contains('failed host lookup')) {
+    return 'The Agent is unreachable. Check that it is running and using the paired address.';
+  }
+  return 'The Agent connection failed. Retrying automatically.';
+}
+
+class OrderedEventBuffer {
+  int lastSequence = 0;
+  final Map<int, Map<String, dynamic>> _pending = <int, Map<String, dynamic>>{};
+
+  List<Map<String, dynamic>> add(int sequence, Map<String, dynamic> event) {
+    if (sequence <= lastSequence) return const <Map<String, dynamic>>[];
+    _pending[sequence] = event;
+    final ready = <Map<String, dynamic>>[];
+    while (true) {
+      final next = _pending.remove(lastSequence + 1);
+      if (next == null) break;
+      lastSequence++;
+      ready.add(next);
+    }
+    return ready;
+  }
+
+  void reset() {
+    lastSequence = 0;
+    _pending.clear();
   }
 }
 

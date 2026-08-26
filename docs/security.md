@@ -50,6 +50,9 @@
 - Authentication failures use the same per-source limit. Device registries and TLS
   private keys are written with owner-only permissions on Unix; Windows relies on the
   user profile directory ACL until the platform credential-store abstraction lands.
+- Task replay is available only inside an already bearer-authenticated WebSocket
+  session. The Agent retains replayable task prompts and output in process memory; it
+  does not write them to disk in this slice, and clears them when the process exits.
 
 The mechanism and rollout constraints are recorded in ADR-0003.
 

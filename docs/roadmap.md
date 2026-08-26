@@ -19,7 +19,7 @@ Exit criteria: Rust checks pass locally and in CI; Flutter checks pass in CI.
 - [x] Authenticated local WebSocket session.
 - [x] Fixed loopback connection from Flutter for desktop validation.
 - [x] Start a supervised Codex task and stream structured events.
-- [ ] Reconnect and replay missed events.
+- [x] Reconnect and replay missed events while the Agent remains running.
 
 Exit criteria: a phone can run and reconnect to a mock task without losing output.
 

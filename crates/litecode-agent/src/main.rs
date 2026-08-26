@@ -3,10 +3,11 @@ mod pairing_ui;
 mod tls;
 
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use axum::{
@@ -39,6 +40,77 @@ struct AppState {
     endpoint: Arc<str>,
     tls_enabled: bool,
     fingerprint: Option<Arc<str>>,
+    task_events: TaskEventStore,
+}
+
+#[derive(Clone, Default)]
+struct TaskEventStore {
+    inner: Arc<Mutex<TaskEventState>>,
+}
+
+#[derive(Default)]
+struct TaskEventState {
+    histories: HashMap<String, TaskHistory>,
+    subscribers: Vec<mpsc::UnboundedSender<AgentEvent>>,
+}
+
+#[derive(Default)]
+struct TaskHistory {
+    next_sequence: u64,
+    events: Vec<AgentEvent>,
+}
+
+impl TaskEventStore {
+    fn subscribe(&self) -> mpsc::UnboundedReceiver<AgentEvent> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.inner
+            .lock()
+            .expect("task event mutex poisoned")
+            .subscribers
+            .push(sender);
+        receiver
+    }
+
+    fn publish(&self, task_id: &TaskId, build: impl FnOnce(u64) -> AgentEvent) {
+        let mut state = self.inner.lock().expect("task event mutex poisoned");
+        let history = state
+            .histories
+            .entry(task_id.as_str().to_owned())
+            .or_default();
+        history.next_sequence += 1;
+        let event = build(history.next_sequence);
+        history.events.push(event.clone());
+        state
+            .subscribers
+            .retain(|subscriber| subscriber.send(event.clone()).is_ok());
+    }
+
+    fn replay(&self, task_id: &TaskId, after_sequence: u64) -> Vec<AgentEvent> {
+        self.inner
+            .lock()
+            .expect("task event mutex poisoned")
+            .histories
+            .get(task_id.as_str())
+            .map(|history| {
+                history
+                    .events
+                    .iter()
+                    .filter(|event| event_sequence(event) > after_sequence)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+fn event_sequence(event: &AgentEvent) -> u64 {
+    match event {
+        AgentEvent::TaskStarted { sequence, .. }
+        | AgentEvent::OutputDelta { sequence, .. }
+        | AgentEvent::ApprovalRequired { sequence, .. }
+        | AgentEvent::TaskCompleted { sequence, .. }
+        | AgentEvent::TaskFailed { sequence, .. } => *sequence,
+    }
 }
 
 #[tokio::main]
@@ -187,6 +259,7 @@ async fn serve(
             endpoint: endpoint.clone().into(),
             tls_enabled: true,
             fingerprint: Some(identity.fingerprint.clone().into()),
+            task_events: TaskEventStore::default(),
         });
         println!("LiteCode agent listening on {endpoint}/v1/ws");
         println!("Pairing interface: {endpoint}/pairing (available from this computer only)");
@@ -210,6 +283,7 @@ async fn serve(
             endpoint: endpoint.clone().into(),
             tls_enabled: false,
             fingerprint: None,
+            task_events: TaskEventStore::default(),
         });
         println!("LiteCode agent listening on {endpoint}/v1/ws");
         println!("Pairing interface: {endpoint}/pairing");
@@ -314,10 +388,18 @@ fn bearer_credential(headers: &HeaderMap) -> Option<&str> {
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
-    let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<AgentEvent>();
+    let mut event_receiver = state.task_events.subscribe();
+    let (direct_sender, mut direct_receiver) = mpsc::unbounded_channel::<AgentEvent>();
 
     let writer = tokio::spawn(async move {
-        while let Some(event) = event_receiver.recv().await {
+        loop {
+            let event = tokio::select! {
+                event = event_receiver.recv() => event,
+                event = direct_receiver.recv() => event,
+            };
+            let Some(event) = event else {
+                break;
+            };
             let Ok(payload) = serde_json::to_string(&event) else {
                 continue;
             };
@@ -339,50 +421,57 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 prompt,
             }) if workspace_id == "local" && tool == "codex" && !prompt.trim().is_empty() => {
                 let workspace = Arc::clone(&state.workspace);
-                let events = event_sender.clone();
+                let events = state.task_events.clone();
                 tokio::spawn(async move {
-                    run_codex(task_id, prompt, workspace.as_ref(), &events).await;
+                    run_codex(task_id, prompt, workspace.as_ref(), events).await;
                 });
             }
-            Ok(ClientCommand::CreateTask { task_id, .. }) => send_event(
-                &event_sender,
-                AgentEvent::TaskFailed {
-                    task_id,
-                    message: "unsupported workspace, tool, or empty prompt".into(),
-                },
-            ),
+            Ok(ClientCommand::CreateTask { task_id, .. }) => {
+                let event_task_id = task_id.clone();
+                state
+                    .task_events
+                    .publish(&task_id, |sequence| AgentEvent::TaskFailed {
+                        task_id: event_task_id,
+                        sequence,
+                        message: "unsupported workspace, tool, or empty prompt".into(),
+                    });
+            }
+            Ok(ClientCommand::ResumeEvents {
+                task_id,
+                after_sequence,
+            }) => {
+                for event in state.task_events.replay(&task_id, after_sequence) {
+                    if direct_sender.send(event).is_err() {
+                        break;
+                    }
+                }
+            }
             Ok(_) => {}
             Err(error) => {
                 let Ok(task_id) = TaskId::new("invalid-command") else {
                     continue;
                 };
-                send_event(
-                    &event_sender,
-                    AgentEvent::TaskFailed {
-                        task_id,
+                let event_task_id = task_id.clone();
+                state
+                    .task_events
+                    .publish(&task_id, |sequence| AgentEvent::TaskFailed {
+                        task_id: event_task_id,
+                        sequence,
                         message: format!("invalid command: {error}"),
-                    },
-                );
+                    });
             }
         }
     }
-
-    drop(event_sender);
+    writer.abort();
     let _ = writer.await;
 }
 
-async fn run_codex(
-    task_id: TaskId,
-    prompt: String,
-    workspace: &PathBuf,
-    events: &mpsc::UnboundedSender<AgentEvent>,
-) {
-    send_event(
-        events,
-        AgentEvent::TaskStarted {
-            task_id: task_id.clone(),
-        },
-    );
+async fn run_codex(task_id: TaskId, prompt: String, workspace: &PathBuf, events: TaskEventStore) {
+    let event_task_id = task_id.clone();
+    events.publish(&task_id, |sequence| AgentEvent::TaskStarted {
+        task_id: event_task_id,
+        sequence,
+    });
 
     let mut command = codex_command();
     let child = command
@@ -404,13 +493,12 @@ async fn run_codex(
 
     let Ok(mut child) = child else {
         let error = child.expect_err("matched the failed process spawn");
-        send_event(
-            events,
-            AgentEvent::TaskFailed {
-                task_id,
-                message: format!("could not start Codex: {error}"),
-            },
-        );
+        let event_task_id = task_id.clone();
+        events.publish(&task_id, |sequence| AgentEvent::TaskFailed {
+            task_id: event_task_id,
+            sequence,
+            message: format!("could not start Codex: {error}"),
+        });
         return;
     };
 
@@ -426,53 +514,54 @@ async fn run_codex(
     let stdout_events = events.clone();
     let stdout_task = tokio::spawn(async move {
         while let Ok(Some(line)) = stdout_lines.next_line().await {
-            send_event(
-                &stdout_events,
-                AgentEvent::OutputDelta {
-                    task_id: stdout_task_id.clone(),
-                    text: line,
-                },
-            );
+            let event_task_id = stdout_task_id.clone();
+            stdout_events.publish(&stdout_task_id, |sequence| AgentEvent::OutputDelta {
+                task_id: event_task_id,
+                sequence,
+                text: line,
+            });
         }
     });
     let stderr_task_id = task_id.clone();
     let stderr_events = events.clone();
     let stderr_task = tokio::spawn(async move {
         while let Ok(Some(line)) = stderr_lines.next_line().await {
-            send_event(
-                &stderr_events,
-                AgentEvent::OutputDelta {
-                    task_id: stderr_task_id.clone(),
-                    text: format!("stderr: {line}"),
-                },
-            );
+            let event_task_id = stderr_task_id.clone();
+            stderr_events.publish(&stderr_task_id, |sequence| AgentEvent::OutputDelta {
+                task_id: event_task_id,
+                sequence,
+                text: format!("stderr: {line}"),
+            });
         }
     });
 
     let status = child.wait().await;
     let _ = tokio::join!(stdout_task, stderr_task);
     match status {
-        Ok(status) if status.success() => send_event(
-            events,
-            AgentEvent::TaskCompleted {
-                task_id,
+        Ok(status) if status.success() => {
+            let event_task_id = task_id.clone();
+            events.publish(&task_id, |sequence| AgentEvent::TaskCompleted {
+                task_id: event_task_id,
+                sequence,
                 summary: "Codex completed successfully".into(),
-            },
-        ),
-        Ok(status) => send_event(
-            events,
-            AgentEvent::TaskFailed {
-                task_id,
+            });
+        }
+        Ok(status) => {
+            let event_task_id = task_id.clone();
+            events.publish(&task_id, |sequence| AgentEvent::TaskFailed {
+                task_id: event_task_id,
+                sequence,
                 message: format!("Codex exited with {status}"),
-            },
-        ),
-        Err(error) => send_event(
-            events,
-            AgentEvent::TaskFailed {
-                task_id,
+            });
+        }
+        Err(error) => {
+            let event_task_id = task_id.clone();
+            events.publish(&task_id, |sequence| AgentEvent::TaskFailed {
+                task_id: event_task_id,
+                sequence,
                 message: format!("failed to wait for Codex: {error}"),
-            },
-        ),
+            });
+        }
     }
 }
 
@@ -494,10 +583,6 @@ fn codex_command() -> Command {
 
     #[cfg(not(windows))]
     Command::new("codex")
-}
-
-fn send_event(sender: &mpsc::UnboundedSender<AgentEvent>, event: AgentEvent) {
-    let _ = sender.send(event);
 }
 
 fn print_status() {
@@ -545,6 +630,7 @@ mod tests {
             endpoint: Arc::from("http://127.0.0.1:47831"),
             tls_enabled: false,
             fingerprint: None,
+            task_events: TaskEventStore::default(),
         };
         (app_router(state), path)
     }
@@ -574,6 +660,45 @@ mod tests {
             "Basic credential".parse().expect("valid header"),
         );
         assert_eq!(bearer_credential(&headers), None);
+    }
+
+    #[test]
+    fn task_events_are_sequenced_and_replayed_after_a_cursor() {
+        let store = TaskEventStore::default();
+        let task_id = TaskId::new("task-replay").expect("valid task id");
+        let first_task_id = task_id.clone();
+        store.publish(&task_id, |sequence| AgentEvent::TaskStarted {
+            task_id: first_task_id,
+            sequence,
+        });
+        let second_task_id = task_id.clone();
+        store.publish(&task_id, |sequence| AgentEvent::OutputDelta {
+            task_id: second_task_id,
+            sequence,
+            text: "second".into(),
+        });
+
+        let replay = store.replay(&task_id, 1);
+
+        assert_eq!(replay.len(), 1);
+        assert_eq!(event_sequence(&replay[0]), 2);
+    }
+
+    #[tokio::test]
+    async fn task_events_continue_without_a_connected_subscriber() {
+        let store = TaskEventStore::default();
+        let task_id = TaskId::new("task-disconnected").expect("valid task id");
+        let event_task_id = task_id.clone();
+        store.publish(&task_id, |sequence| AgentEvent::TaskCompleted {
+            task_id: event_task_id,
+            sequence,
+            summary: "finished while disconnected".into(),
+        });
+
+        let replay = store.replay(&task_id, 0);
+
+        assert_eq!(replay.len(), 1);
+        assert_eq!(event_sequence(&replay[0]), 1);
     }
 
     #[tokio::test]
