@@ -13,6 +13,7 @@ futures-util.workspace = true
 litecode-core = { path = "../litecode-core" }
 litecode-protocol = { path = "../litecode-protocol" }
 rand.workspace = true
+qrcode.workspace = true
 rcgen.workspace = true
 rustls-pemfile = "2.2.0"
 serde.workspace = true
@@ -20,6 +21,9 @@ serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5.2", features = ["util"] }
 
 [lints]
 workspace = true

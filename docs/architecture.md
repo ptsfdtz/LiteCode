@@ -35,6 +35,13 @@ stable Agent ID, TLS identity, and hashed device registry. Plain transport is re
 to loopback; explicitly enabled TLS transport may bind to the LAN and advertises a
 certificate fingerprint for client pinning.
 
+The Agent also serves a minimal host pairing interface at `/pairing`. It renders the
+current invitation locally as a QR code and supports regeneration and cancellation.
+The page and all of its control/status endpoints require a loopback source address, so
+the LAN listener does not become an unauthenticated administration interface. Pairing
+state remains owned by the same authorization service used by `POST /v1/pair`; there is
+no second invitation store or alternate authentication path.
+
 ### Core library
 
 Contains platform-independent workspace and task rules. It does not depend on network,
@@ -82,8 +89,9 @@ Flutter Windows client
 
 This slice validates component boundaries, process streaming, host identity, one-time
 pairing, upgrade authentication, encrypted LAN transport, mobile QR handling, secure
-client credential storage, and revocation of new sessions. It does not yet provide
-mDNS, active-session invalidation, task persistence, approval, or reconnect guarantees.
+client credential storage, a local host pairing interface, and revocation of new
+sessions. It does not yet provide device management UI, mDNS, active-session
+invalidation, task persistence, approval, or reconnect guarantees.
 
 ## Planned dependency direction
 

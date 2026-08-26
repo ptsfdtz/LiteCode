@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pair a device | LiteCode</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #172033; background: #f5f7fa; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 280px; }
+    header { height: 58px; display: flex; align-items: center; padding: 0 28px; border-bottom: 1px solid #dfe4eb; background: #fff; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+    .mark { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 5px; background: #176b5b; color: #fff; font-size: 13px; }
+    main { width: min(920px, calc(100% - 40px)); margin: 44px auto; }
+    h1 { margin: 0 0 8px; font-size: 28px; line-height: 1.2; letter-spacing: 0; }
+    .lede { margin: 0 0 30px; color: #5c6678; }
+    .layout { display: grid; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); gap: 42px; align-items: start; }
+    .qr-panel { text-align: center; }
+    .qr-frame { width: min(100%, 340px); aspect-ratio: 1; padding: 10px; margin: 0 auto 18px; border: 1px solid #d9dee7; border-radius: 8px; background: #fff; box-shadow: 0 6px 20px rgba(28, 39, 58, .06); }
+    .qr-frame img { width: 100%; height: 100%; display: block; }
+    .qr-frame.inactive { display: grid; place-items: center; padding: 36px; color: #687386; }
+    .qr-frame.inactive img { display: none; }
+    .state { min-height: 24px; margin: 0 0 16px; font-weight: 600; }
+    .state.active { color: #126451; }
+    .actions { display: flex; justify-content: center; gap: 10px; }
+    button { min-height: 40px; padding: 0 16px; border: 1px solid #cbd2dc; border-radius: 6px; background: #fff; color: #253047; font: inherit; font-weight: 600; cursor: pointer; }
+    button.primary { border-color: #176b5b; background: #176b5b; color: #fff; }
+    button:hover { background: #f2f4f7; }
+    button.primary:hover { background: #105c4e; }
+    button:focus-visible { outline: 3px solid rgba(23, 107, 91, .25); outline-offset: 2px; }
+    button:disabled { opacity: .55; cursor: default; }
+    .details { border-top: 1px solid #d9dee7; }
+    .detail { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 16px; padding: 16px 0; border-bottom: 1px solid #d9dee7; }
+    dt { color: #687386; }
+    dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+    .badge { display: inline-flex; align-items: center; gap: 7px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #16836c; }
+    .error { color: #a12b2b; }
+    @media (max-width: 680px) {
+      header { padding: 0 18px; }
+      main { width: min(100% - 28px, 430px); margin: 28px auto; }
+      h1 { font-size: 24px; }
+      .lede { margin-bottom: 24px; }
+      .layout { grid-template-columns: 1fr; gap: 34px; }
+      .qr-frame { width: min(100%, 320px); }
+      .detail { grid-template-columns: 1fr; gap: 5px; padding: 13px 0; }
+      .actions { flex-wrap: wrap; }
+    }
+    @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body>
+  <header><div class="brand"><span class="mark">L</span> LiteCode Agent</div></header>
+  <main>
+    <h1>Pair a device</h1>
+    <p class="lede">Scan this code with the LiteCode mobile app.</p>
+    <div class="layout">
+      <section class="qr-panel" aria-live="polite">
+        <div class="qr-frame" id="qrFrame"><img id="qr" alt="LiteCode pairing QR code"></div>
+        <p class="state" id="state">Loading invitation...</p>
+        <div class="actions">
+          <button class="primary" id="regenerate" type="button">Regenerate code</button>
+          <button id="cancel" type="button">Cancel invitation</button>
+        </div>
+      </section>
+      <dl class="details">
+        <div class="detail"><dt>Computer</dt><dd id="computer">...</dd></div>
+        <div class="detail"><dt>Agent ID</dt><dd id="agent">...</dd></div>
+        <div class="detail"><dt>Listening address</dt><dd id="address">...</dd></div>
+        <div class="detail"><dt>TLS</dt><dd id="tls">...</dd></div>
+        <div class="detail"><dt>Invitation expires</dt><dd id="expiry">...</dd></div>
+      </dl>
+    </div>
+  </main>
+  <script>
+    const elements = Object.fromEntries(['qrFrame','qr','state','regenerate','cancel','computer','agent','address','tls','expiry'].map(id => [id, document.getElementById(id)]));
+    let current;
+    let busy = false;
+    const labels = { expired: 'Invitation expired', used: 'Invitation used', cancelled: 'Invitation cancelled' };
+
+    async function refresh() {
+      try {
+        const response = await fetch('/v1/pairing-invitation', { cache: 'no-store' });
+        if (!response.ok) throw new Error('status request failed');
+        current = await response.json();
+        elements.computer.textContent = current.computerName;
+        elements.agent.textContent = current.agentId;
+        elements.address.textContent = current.listeningAddress;
+        elements.tls.innerHTML = `<span class="badge"><span class="dot"></span>${current.tlsEnabled ? 'Enabled' : 'Loopback only'}</span>`;
+        renderState();
+      } catch (_) {
+        elements.state.textContent = 'Unable to load pairing status';
+        elements.state.className = 'state error';
+      }
+    }
+
+    function renderState() {
+      if (!current) return;
+      const remaining = Math.max(0, current.expiresAtUnix - Math.floor(Date.now() / 1000));
+      const active = current.invitationStatus === 'active' && remaining > 0;
+      if (active) {
+        const minutes = Math.floor(remaining / 60);
+        const seconds = String(remaining % 60).padStart(2, '0');
+        elements.state.textContent = `Expires in ${minutes}:${seconds}`;
+        elements.state.className = 'state active';
+        elements.expiry.textContent = new Date(current.expiresAtUnix * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (!elements.qr.src || elements.qr.dataset.expiry != current.expiresAtUnix) {
+          elements.qr.src = `/v1/pairing-invitation/qr?v=${current.expiresAtUnix}`;
+          elements.qr.dataset.expiry = current.expiresAtUnix;
+        }
+        elements.qrFrame.className = 'qr-frame';
+        elements.qrFrame.removeAttribute('data-message');
+      } else {
+        const status = active ? 'expired' : current.invitationStatus;
+        elements.state.textContent = labels[status] || 'Invitation unavailable';
+        elements.state.className = 'state';
+        elements.expiry.textContent = status === 'expired' ? 'Expired' : 'Not active';
+        elements.qrFrame.className = 'qr-frame inactive';
+        elements.qrFrame.textContent = elements.state.textContent;
+      }
+      elements.cancel.disabled = busy || !active;
+      elements.regenerate.disabled = busy;
+    }
+
+    async function act(path) {
+      if (busy) return;
+      busy = true; renderState();
+      try {
+        const response = await fetch(path, { method: 'POST' });
+        if (!response.ok) throw new Error('action failed');
+        elements.qrFrame.innerHTML = '<img id="qr" alt="LiteCode pairing QR code">';
+        elements.qr = document.getElementById('qr');
+        await refresh();
+      } catch (_) {
+        elements.state.textContent = 'Could not update invitation';
+        elements.state.className = 'state error';
+      } finally { busy = false; renderState(); }
+    }
+
+    elements.regenerate.addEventListener('click', () => act('/v1/pairing-invitation/regenerate'));
+    elements.cancel.addEventListener('click', () => act('/v1/pairing-invitation/cancel'));
+    refresh();
+    setInterval(() => { renderState(); if (current && current.invitationStatus === 'active' && current.expiresAtUnix <= Date.now() / 1000) refresh(); }, 1000);
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

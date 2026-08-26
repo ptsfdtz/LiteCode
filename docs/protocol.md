@@ -38,6 +38,22 @@ Plain loopback invitations omit `fingerprint` and advertise an HTTP origin. TLS
 invitations include it. Clients reject plain non-loopback endpoints and malformed
 SHA-256 fingerprints.
 
+The host-side pairing interface exposes the current invitation through local control
+endpoints. These endpoints are an Agent administration surface and reject non-loopback
+sources:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /pairing` | Render the local pairing interface |
+| `GET /v1/pairing-invitation` | Return host, transport, expiry, and lifecycle status |
+| `GET /v1/pairing-invitation/qr` | Render the active invitation as an SVG QR code |
+| `POST /v1/pairing-invitation/regenerate` | Invalidate the prior invitation and create a five-minute invitation |
+| `POST /v1/pairing-invitation/cancel` | Invalidate the active invitation |
+
+The status response does not contain the pairing secret. The QR endpoint returns `404`
+unless the invitation is active. Lifecycle status is one of `active`, `used`,
+`cancelled`, or `expired`.
+
 ## Pairing exchange
 
 `POST /v1/pair` accepts JSON with `protocolVersion`, `pairingSecret`, and `deviceName`.
@@ -48,6 +64,9 @@ On success it returns `protocolVersion`, `agentId`, `deviceId`, and
 Errors use HTTP status `400` for protocol incompatibility, `401` for an invalid or used
 invitation, and `429` for a rate-limited source. Error bodies contain stable codes and
 never echo supplied values.
+
+Regeneration and cancellation invalidate the previous secret. Neither operation can
+make a consumed, cancelled, or expired invitation usable again.
 
 WebSocket upgrades return `401` for missing, invalid, or revoked credentials and `429`
 after repeated authentication failures from the same source.

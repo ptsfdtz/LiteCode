@@ -42,6 +42,11 @@
   pinned by the client. Plain `http` and `ws` are permitted only on loopback.
 - Pairing failures are limited to five attempts per source per minute. Secrets and
   credentials must never appear in logs.
+- The Agent pairing interface and its invitation status, QR, regeneration, and
+  cancellation endpoints accept only loopback source addresses. They are not exposed
+  as unauthenticated LAN administration endpoints, even when task transport uses TLS.
+- Regenerating or cancelling an invitation immediately invalidates its prior secret.
+  QR responses use `Cache-Control: no-store`.
 - Authentication failures use the same per-source limit. Device registries and TLS
   private keys are written with owner-only permissions on Unix; Windows relies on the
   user profile directory ACL until the platform credential-store abstraction lands.
@@ -74,7 +79,8 @@ fingerprint matches. Device revocation rejects subsequent connection attempts.
 ## Open security work
 
 - Certificate rotation and host platform credential-store abstraction.
-- Device management UI plus active-session invalidation after revocation.
+- Device management UI plus active-session invalidation after revocation. The minimal
+  pairing interface does not list, modify, or revoke devices.
 - Exact approval risk classification.
 - Task event retention and secure deletion policy.
 

@@ -48,6 +48,7 @@ Exit criteria: the same mobile build completes the MVP journey against every hos
 
 - [ ] mDNS discovery.
 - [x] QR pairing, secure client credentials, and certificate-pinned TLS transport.
+- [x] Minimal host-side pairing interface and invitation lifecycle controls.
 - [ ] Durable encrypted task metadata.
 - [ ] Device revocation and security audit view.
 - [ ] Tray/menu-bar configuration shell.

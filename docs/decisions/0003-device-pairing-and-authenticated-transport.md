@@ -37,6 +37,13 @@ mobile QR handling, secure client credential storage, and device revocation comm
 Plain transport remains loopback-only. Non-loopback binding is available only with the
 explicit `--tls` option and an advertised host.
 
+The Agent exposes a minimal host-side pairing page that shows its computer name, Agent
+ID, listening address, TLS state, invitation expiry, and a scannable QR code. Local
+controls may cancel the current invitation or atomically invalidate it and generate a
+new five-minute invitation. A successful pairing consumes the invitation as before.
+The page and its status, QR, and mutation endpoints reject every non-loopback source;
+they are not a LAN device-management API.
+
 ## Consequences
 
 - Knowing a network endpoint is insufficient to execute commands.
@@ -49,3 +56,5 @@ explicit `--tls` option and an advertised host.
   handling.
 - ADR-0002 remains in force for plain transport; it does not permit non-loopback
   `http` or `ws`.
+- The host pairing interface does not change WebSocket authorization: every upgrade
+  still requires a valid, non-revoked bearer credential.

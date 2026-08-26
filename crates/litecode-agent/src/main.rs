@@ -1,4 +1,5 @@
 mod auth;
+mod pairing_ui;
 mod tls;
 
 use std::{
@@ -34,6 +35,10 @@ const DEFAULT_BIND: &str = "127.0.0.1:47831";
 struct AppState {
     auth: auth::AuthService,
     workspace: Arc<PathBuf>,
+    computer_name: Arc<str>,
+    endpoint: Arc<str>,
+    tls_enabled: bool,
+    fingerprint: Option<Arc<str>>,
 }
 
 #[tokio::main]
@@ -170,20 +175,21 @@ async fn serve(
     }
 
     let auth = auth::AuthService::load(state_dir.join("devices.json"))?;
-
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/v1/pair", axum::routing::post(pair_device))
-        .route("/v1/ws", get(websocket_upgrade))
-        .with_state(AppState {
-            auth: auth.clone(),
-            workspace: Arc::new(workspace.clone()),
-        });
+    let computer_name: Arc<str> = computer_name().into();
     println!("Authorized workspace: {}", workspace.display());
     if tls_enabled {
         let identity = tls::load_or_create(&state_dir, advertised_host).await?;
         let endpoint = format!("https://{advertised_host}:{}", address.port());
+        let app = app_router(AppState {
+            auth: auth.clone(),
+            workspace: Arc::new(workspace.clone()),
+            computer_name: computer_name.clone(),
+            endpoint: endpoint.clone().into(),
+            tls_enabled: true,
+            fingerprint: Some(identity.fingerprint.clone().into()),
+        });
         println!("LiteCode agent listening on {endpoint}/v1/ws");
+        println!("Pairing interface: {endpoint}/pairing (available from this computer only)");
         println!(
             "Pairing invitation (valid once for 5 minutes): {}",
             auth.invitation_uri(&endpoint, Some(&identity.fingerprint))
@@ -197,7 +203,16 @@ async fn serve(
             .await
             .map_err(|error| format!("cannot bind {address}: {error}"))?;
         let endpoint = format!("http://{advertised_host}:{}", address.port());
+        let app = app_router(AppState {
+            auth: auth.clone(),
+            workspace: Arc::new(workspace.clone()),
+            computer_name,
+            endpoint: endpoint.clone().into(),
+            tls_enabled: false,
+            fingerprint: None,
+        });
         println!("LiteCode agent listening on {endpoint}/v1/ws");
+        println!("Pairing interface: {endpoint}/pairing");
         println!(
             "Pairing invitation (valid once for 5 minutes): {}",
             auth.invitation_uri(&endpoint, None)
@@ -209,6 +224,31 @@ async fn serve(
         .await
         .map_err(|error| format!("server failed: {error}"))
     }
+}
+
+fn app_router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/pairing", get(pairing_ui::page))
+        .route("/v1/pairing-invitation", get(pairing_ui::status))
+        .route("/v1/pairing-invitation/qr", get(pairing_ui::qr))
+        .route(
+            "/v1/pairing-invitation/regenerate",
+            axum::routing::post(pairing_ui::regenerate),
+        )
+        .route(
+            "/v1/pairing-invitation/cancel",
+            axum::routing::post(pairing_ui::cancel),
+        )
+        .route("/v1/pair", axum::routing::post(pair_device))
+        .route("/v1/ws", get(websocket_upgrade))
+        .with_state(state)
+}
+
+fn computer_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "This computer".into())
 }
 
 async fn health() -> &'static str {
@@ -481,6 +521,44 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, header},
+    };
+    use tower::ServiceExt;
+
+    fn test_app() -> (Router, PathBuf) {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "litecode-endpoint-test-{}-{nonce}.json",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_file(&path);
+        let auth = auth::AuthService::load(path.clone()).expect("loads auth");
+        let state = AppState {
+            auth,
+            workspace: Arc::new(std::env::current_dir().expect("current directory")),
+            computer_name: Arc::from("Test computer"),
+            endpoint: Arc::from("http://127.0.0.1:47831"),
+            tls_enabled: false,
+            fingerprint: None,
+        };
+        (app_router(state), path)
+    }
+
+    fn request(method: &str, uri: &str, source: SocketAddr) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .version(axum::http::Version::HTTP_11)
+            .body(Body::empty())
+            .expect("request");
+        request.extensions_mut().insert(ConnectInfo(source));
+        request
+    }
 
     #[test]
     fn bearer_header_requires_the_expected_scheme() {
@@ -496,5 +574,72 @@ mod tests {
             "Basic credential".parse().expect("valid header"),
         );
         assert_eq!(bearer_credential(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn pairing_endpoints_cover_the_invitation_lifecycle() {
+        let (app, store) = test_app();
+        let source: SocketAddr = "127.0.0.1:40000".parse().expect("socket address");
+
+        let response = app
+            .clone()
+            .oneshot(request("GET", "/v1/pairing-invitation/qr", source))
+            .await
+            .expect("QR response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("image/svg+xml")
+        );
+
+        let response = app
+            .clone()
+            .oneshot(request("POST", "/v1/pairing-invitation/cancel", source))
+            .await
+            .expect("cancel response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = app
+            .clone()
+            .oneshot(request("GET", "/v1/pairing-invitation", source))
+            .await
+            .expect("status response");
+        let body = to_bytes(response.into_body(), 4096)
+            .await
+            .expect("status body");
+        let status: serde_json::Value = serde_json::from_slice(&body).expect("status JSON");
+        assert_eq!(status["invitationStatus"], "cancelled");
+
+        let response = app
+            .clone()
+            .oneshot(request("POST", "/v1/pairing-invitation/regenerate", source))
+            .await
+            .expect("regenerate response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let response = app
+            .oneshot(request("GET", "/v1/pairing-invitation", source))
+            .await
+            .expect("status response");
+        let body = to_bytes(response.into_body(), 4096)
+            .await
+            .expect("status body");
+        let status: serde_json::Value = serde_json::from_slice(&body).expect("status JSON");
+        assert_eq!(status["invitationStatus"], "active");
+        let _ = std::fs::remove_file(store);
+    }
+
+    #[tokio::test]
+    async fn pairing_interface_is_rejected_for_non_loopback_sources() {
+        let (app, store) = test_app();
+        let source: SocketAddr = "192.0.2.10:40000".parse().expect("socket address");
+        let response = app
+            .oneshot(request("GET", "/pairing", source))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let _ = std::fs::remove_file(store);
     }
 }

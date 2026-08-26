@@ -31,6 +31,9 @@ M1 - Local vertical slice
   and an explicit TLS-only path for non-loopback binding.
 - Added device listing and revocation commands; revoked credentials cannot establish
   new sessions.
+- Added a loopback-only Agent pairing interface with host and transport details, a
+  scannable QR invitation, a five-minute countdown, and invitation regeneration and
+  cancellation controls.
 
 ## Current focus
 

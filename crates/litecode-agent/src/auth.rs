@@ -37,7 +37,15 @@ struct PairingInvitation {
     secret_hash: [u8; 32],
     secret: String,
     expires_at: Instant,
-    used: bool,
+    expires_at_unix: u64,
+    state: InvitationState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InvitationState {
+    Active,
+    Used,
+    Cancelled,
 }
 
 struct FailureBucket {
@@ -64,6 +72,13 @@ pub struct PairingResult {
     pub agent_id: String,
     pub device_id: String,
     pub credential: String,
+}
+
+pub struct InvitationSummary {
+    pub agent_id: String,
+    pub secret: Option<String>,
+    pub expires_at_unix: u64,
+    pub status: &'static str,
 }
 
 pub struct DeviceSummary {
@@ -101,18 +116,51 @@ impl AuthService {
     }
 
     pub fn invitation_uri(&self, endpoint: &str, fingerprint: Option<&str>) -> String {
-        let state = self.inner.lock().expect("auth mutex poisoned");
+        let summary = self.invitation();
+        let Some(secret) = summary.secret else {
+            return String::new();
+        };
         let mut invitation = format!(
             "litecode://pair?agent={}&endpoint={}&secret={}",
-            state.store.agent_id,
+            summary.agent_id,
             URL_SAFE_NO_PAD.encode(endpoint),
-            state.invitation.secret
+            secret
         );
         if let Some(fingerprint) = fingerprint {
             invitation.push_str("&fingerprint=");
             invitation.push_str(fingerprint);
         }
         invitation
+    }
+
+    pub fn invitation(&self) -> InvitationSummary {
+        let state = self.inner.lock().expect("auth mutex poisoned");
+        let expired = Instant::now() > state.invitation.expires_at;
+        let status = match (state.invitation.state, expired) {
+            (InvitationState::Active, false) => "active",
+            (InvitationState::Active, true) => "expired",
+            (InvitationState::Used, _) => "used",
+            (InvitationState::Cancelled, _) => "cancelled",
+        };
+        InvitationSummary {
+            agent_id: state.store.agent_id.clone(),
+            secret: (status == "active").then(|| state.invitation.secret.clone()),
+            expires_at_unix: state.invitation.expires_at_unix,
+            status,
+        }
+    }
+
+    pub fn regenerate_invitation(&self) {
+        let mut state = self.inner.lock().expect("auth mutex poisoned");
+        state.invitation = new_invitation();
+        state.pairing_failures.clear();
+    }
+
+    pub fn cancel_invitation(&self) {
+        let mut state = self.inner.lock().expect("auth mutex poisoned");
+        if state.invitation.state == InvitationState::Active {
+            state.invitation.state = InvitationState::Cancelled;
+        }
     }
 
     pub fn pair(
@@ -126,7 +174,7 @@ impl AuthService {
             return Err("pairing_rate_limited");
         }
         let supplied_hash = hash(secret);
-        let invitation_valid = !state.invitation.used
+        let invitation_valid = state.invitation.state == InvitationState::Active
             && Instant::now() <= state.invitation.expires_at
             && bool::from(supplied_hash.ct_eq(&state.invitation.secret_hash));
         if !invitation_valid || device_name.trim().is_empty() || device_name.len() > 80 {
@@ -136,7 +184,7 @@ impl AuthService {
 
         let credential = random_token(32);
         let device_id = random_token(16);
-        state.invitation.used = true;
+        state.invitation.state = InvitationState::Used;
         state.pairing_failures.remove(source);
         state.store.devices.push(DeviceRecord {
             id: device_id.clone(),
@@ -239,7 +287,12 @@ fn new_invitation() -> PairingInvitation {
         secret_hash: hash(&secret),
         secret,
         expires_at: Instant::now() + PAIRING_TTL,
-        used: false,
+        expires_at_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + PAIRING_TTL.as_secs(),
+        state: InvitationState::Active,
     }
 }
 
@@ -332,6 +385,44 @@ mod tests {
         assert!(service.revoke(&paired.device_id).expect("revokes"));
         assert_eq!(service.authenticate("local", &paired.credential), Ok(false));
         assert!(service.devices()[0].revoked);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn invitation_can_be_cancelled_and_regenerated() {
+        let path = temporary_store("lifecycle");
+        let service = AuthService::load(path.clone()).expect("loads store");
+        let original = service.invitation().secret.expect("active secret");
+
+        service.cancel_invitation();
+        assert_eq!(service.invitation().status, "cancelled");
+        assert_eq!(
+            service.pair("local", &original, "Phone").err(),
+            Some("invalid_pairing_request")
+        );
+
+        service.regenerate_invitation();
+        let replacement = service.invitation();
+        assert_eq!(replacement.status, "active");
+        assert_ne!(replacement.secret.as_deref(), Some(original.as_str()));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn expired_invitation_is_inactive() {
+        let path = temporary_store("expiry");
+        let service = AuthService::load(path.clone()).expect("loads store");
+        service
+            .inner
+            .lock()
+            .expect("auth mutex poisoned")
+            .invitation
+            .expires_at = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("one second before now");
+
+        assert_eq!(service.invitation().status, "expired");
+        assert!(service.invitation().secret.is_none());
         let _ = fs::remove_file(path);
     }
 }
