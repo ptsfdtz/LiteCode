@@ -29,6 +29,19 @@
 - Agent logs record security-relevant actions without recording secret values.
 - Rate limits apply to pairing and authentication failures.
 
+## Local development exception
+
+The M1 development slice is unauthenticated and therefore enforces all of the following:
+
+- binds only to an IP loopback address;
+- accepts only workspace ID `local` and tool ID `codex`;
+- authorizes exactly one canonical workspace supplied when the agent starts;
+- starts Codex with `workspace-write` sandboxing and ephemeral session storage;
+- is not suitable for LAN or public network exposure.
+
+Removing the loopback restriction requires pairing, authenticated transport, device
+revocation, and an accepted ADR for the selected mechanisms.
+
 ## Explicit non-goals for the MVP
 
 - Defending against an already-compromised host operating system.
@@ -44,4 +57,3 @@
 
 Security-sensitive implementation must update this document and add an ADR when it
 chooses one of these mechanisms.
-

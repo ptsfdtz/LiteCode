@@ -23,3 +23,5 @@ Thumbs.db
 !.env.example
 *.local.json
 
+# Local end-to-end test artifacts
+/test-workspaces/

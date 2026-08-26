@@ -2,26 +2,21 @@
 
 ## Status
 
-Draft for protocol version 1. The Rust types currently define the domain vocabulary;
-wire serialization and transport framing are part of the first vertical slice.
+Draft for protocol version 1. Rust types define the domain vocabulary and serialize to
+JSON on the implemented local WebSocket slice.
 
 ## Transport
 
 - Local discovery: mDNS with a non-sensitive agent identifier.
-- Session: authenticated WebSocket over TLS.
+- Local demo session: unauthenticated WebSocket restricted to the loopback interface.
+- Networked session target: authenticated WebSocket over TLS after device pairing.
 - Encoding: JSON for the MVP.
 - Compatibility: every envelope includes a protocol version.
 
 ## Envelope
 
-```json
-{
-  "protocolVersion": 1,
-  "messageId": "msg_01...",
-  "type": "create_task",
-  "payload": {}
-}
-```
+The local slice currently sends tagged command and event objects directly. Versioned
+envelopes, message identifiers, and replay sequences remain required before LAN use.
 
 Events additionally include `taskId` and a monotonically increasing `sequence` when
 they belong to a task.
@@ -52,4 +47,3 @@ they belong to a task.
 - Unknown message types receive an `unsupported_message` error.
 - Breaking schema or semantic changes increment `protocolVersion`.
 - Secrets, environment values, and raw credentials are never protocol payloads.
-

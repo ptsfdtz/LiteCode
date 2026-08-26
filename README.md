@@ -37,6 +37,25 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+### Local end-to-end demo
+
+Create an isolated workspace, then start the loopback-only agent:
+
+```powershell
+New-Item -ItemType Directory -Force test-workspaces/e2e
+cargo run -p litecode-agent -- serve --workspace test-workspaces/e2e
+```
+
+In a second terminal, start the Windows Flutter client:
+
+```powershell
+cd apps/mobile
+flutter run -d windows
+```
+
+The current vertical slice deliberately listens only on `127.0.0.1`. It is suitable
+for local development, not for LAN or internet exposure.
+
 ### Flutter app
 
 Flutter 3.47 or newer is recommended. The Android and iOS platform shells are checked

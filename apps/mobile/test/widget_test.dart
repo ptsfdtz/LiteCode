@@ -3,11 +3,11 @@ import 'package:litecode_mobile/main.dart';
 
 void main() {
   testWidgets('shows the empty device state', (WidgetTester tester) async {
-    await tester.pumpWidget(const LiteCodeApp());
+    await tester.pumpWidget(const LiteCodeApp(autoConnect: false));
 
     expect(find.text('LiteCode'), findsOneWidget);
-    expect(find.text('No computers connected'), findsOneWidget);
-    expect(find.text('Pair computer'), findsOneWidget);
+    expect(find.text('Task'), findsOneWidget);
+    expect(find.text('Run task'), findsOneWidget);
+    expect(find.text('No task activity'), findsOneWidget);
   });
 }
-

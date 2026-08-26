@@ -6,9 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+axum = { version = "0.8.4", features = ["ws"] }
+futures-util.workspace = true
 litecode-core = { path = "../litecode-core" }
 litecode-protocol = { path = "../litecode-protocol" }
+serde_json.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
-

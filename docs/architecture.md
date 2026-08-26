@@ -29,6 +29,10 @@ files directly and does not need to understand Codex-specific terminal formattin
 Owns network sessions, authentication, task lifecycle, persistence, and process
 supervision. It continues running tasks when the phone disconnects.
 
+The current M1 slice provides `GET /health` and a WebSocket endpoint at `/v1/ws`. Its
+server rejects non-loopback bind addresses until pairing and transport authentication
+are implemented.
+
 ### Core library
 
 Contains platform-independent workspace and task rules. It does not depend on network,
@@ -63,6 +67,20 @@ and platform-specific paths behind narrow interfaces.
 - Events have a monotonically increasing sequence per task for reconnect replay.
 - Stopping the agent is explicit; closing the mobile app does not stop tasks.
 
+## Implemented local slice
+
+```text
+Flutter Windows client
+  -> ws://127.0.0.1:47831/v1/ws
+  -> Rust agent with one startup-authorized workspace
+  -> codex exec --json --ephemeral --sandbox workspace-write
+  -> structured task events returned to Flutter
+```
+
+This slice validates component boundaries and process streaming. It does not claim the
+pairing, authentication, persistence, approval, or reconnect guarantees planned for the
+networked MVP.
+
 ## Planned dependency direction
 
 ```text
@@ -71,4 +89,3 @@ litecode-agent -----------------> litecode-protocol
 ```
 
 The core and protocol crates must not depend on the executable or platform adapters.
-

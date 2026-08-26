@@ -15,10 +15,10 @@ Exit criteria: Rust checks pass locally and in CI; Flutter checks pass in CI.
 
 ## M1 - Local vertical slice
 
-- [ ] Agent configuration with one authorized workspace.
+- [x] Agent startup configuration with one authorized workspace.
 - [ ] Authenticated local WebSocket session.
-- [ ] Manual address connection from Flutter.
-- [ ] Start a supervised mock task and stream structured events.
+- [x] Fixed loopback connection from Flutter for desktop validation.
+- [x] Start a supervised Codex task and stream structured events.
 - [ ] Reconnect and replay missed events.
 
 Exit criteria: a phone can run and reconnect to a mock task without losing output.
@@ -26,8 +26,8 @@ Exit criteria: a phone can run and reconnect to a mock task without losing outpu
 ## M2 - Codex integration
 
 - [ ] Detect Codex CLI and report capability.
-- [ ] Start Codex in an authorized workspace.
-- [ ] Stream normalized output and task state.
+- [x] Start Codex in an authorized workspace.
+- [x] Stream normalized task state and Codex JSONL output.
 - [ ] Send follow-up input.
 - [ ] Resolve approvals and stop the task.
 - [ ] Show task summary and changed files.

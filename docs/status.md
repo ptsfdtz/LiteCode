@@ -1,10 +1,10 @@
 # Project status
 
-Last updated: 2026-08-24
+Last updated: 2026-08-26
 
 ## Current phase
 
-M0 - Foundation
+M1 - Local vertical slice
 
 ## Completed
 
@@ -15,10 +15,15 @@ M0 - Foundation
 - Added architecture, protocol, security, roadmap, and ADR documentation.
 - Added continuous integration for Rust on Windows, macOS, and Linux.
 - Validated Flutter analysis, widget tests, and an Android debug APK build.
+- Added the Flutter Windows development target and built the desktop client.
+- Added the loopback WebSocket Agent and structured JSON command/event transport.
+- Added supervised `codex exec` streaming with a startup-authorized workspace.
+- Verified Flutter -> Agent -> Codex end to end with exact file-content validation.
 
 ## Current focus
 
-- Design the M1 authenticated WebSocket vertical slice.
+- Replace the fixed loopback connection with pairing and authenticated transport.
+- Add durable task events and reconnect replay.
 
 ## Blockers
 
@@ -26,6 +31,7 @@ M0 - Foundation
 
 ## Next actions
 
-1. Write ADR-0002 for the M1 transport and authentication mechanism.
-2. Implement an in-memory mock task in the agent.
-3. Connect the Flutter app and validate reconnect/event replay behavior.
+1. Design pairing, device identity, and authenticated transport in a new ADR.
+2. Add host-side workspace configuration and capability discovery.
+3. Implement reconnect/event replay behavior.
+4. Add explicit task cancellation and approval handling.

@@ -2,10 +2,13 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// Version of the application-level protocol implemented by this crate.
 pub const PROTOCOL_VERSION: u16 = 1;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct TaskId(String);
 
 impl TaskId {
@@ -28,7 +31,8 @@ impl TaskId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientCommand {
     CreateTask {
         task_id: TaskId,
@@ -50,13 +54,15 @@ pub enum ClientCommand {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     ApproveOnce,
     Reject,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     TaskStarted {
         task_id: TaskId,
@@ -102,5 +108,20 @@ mod tests {
     #[test]
     fn task_id_rejects_blank_values() {
         assert_eq!(TaskId::new("  "), Err(ProtocolError::EmptyIdentifier));
+    }
+
+    #[test]
+    fn create_task_uses_the_wire_contract() {
+        let command = ClientCommand::CreateTask {
+            task_id: TaskId::new("task-1").expect("valid task id"),
+            workspace_id: "local".into(),
+            tool: "codex".into(),
+            prompt: "Check the project".into(),
+        };
+
+        let json = serde_json::to_string(&command).expect("serializes command");
+
+        assert!(json.contains(r#""type":"create_task""#));
+        assert!(json.contains(r#""task_id":"task-1""#));
     }
 }
