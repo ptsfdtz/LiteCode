@@ -1,16 +1,21 @@
+mod auth;
+
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode, sync::Arc};
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{
-        State, WebSocketUpgrade,
+        ConnectInfo, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
-use litecode_protocol::{AgentEvent, ClientCommand, PROTOCOL_VERSION, TaskId};
+use litecode_protocol::{
+    AgentEvent, ClientCommand, PROTOCOL_VERSION, PairDeviceRequest, PairDeviceResponse, TaskId,
+};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
@@ -21,6 +26,7 @@ const DEFAULT_BIND: &str = "127.0.0.1:47831";
 
 #[derive(Clone)]
 struct AppState {
+    auth: auth::AuthService,
     workspace: Arc<PathBuf>,
 }
 
@@ -45,7 +51,9 @@ async fn run() -> Result<(), String> {
         Some("serve") => {
             let workspace = required_flag(&arguments, "--workspace")?;
             let bind = optional_flag(&arguments, "--bind").unwrap_or(DEFAULT_BIND);
-            serve(PathBuf::from(workspace), bind).await
+            let state_dir = optional_flag(&arguments, "--state-dir")
+                .map_or_else(default_state_dir, PathBuf::from);
+            serve(PathBuf::from(workspace), bind, state_dir).await
         }
         Some("version" | "--version" | "-V") => {
             println!("litecode-agent {}", env!("CARGO_PKG_VERSION"));
@@ -71,7 +79,14 @@ fn optional_flag<'a>(arguments: &'a [String], name: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-async fn serve(workspace: PathBuf, bind: &str) -> Result<(), String> {
+fn default_state_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("XDG_STATE_HOME"))
+        .map_or_else(|| PathBuf::from(".litecode"), PathBuf::from)
+        .join("LiteCode")
+}
+
+async fn serve(workspace: PathBuf, bind: &str, state_dir: PathBuf) -> Result<(), String> {
     let workspace = workspace
         .canonicalize()
         .map_err(|error| format!("invalid workspace {}: {error}", workspace.display()))?;
@@ -79,13 +94,19 @@ async fn serve(workspace: PathBuf, bind: &str) -> Result<(), String> {
         .parse()
         .map_err(|error| format!("invalid bind address {bind}: {error}"))?;
     if !address.ip().is_loopback() {
-        return Err("the demo agent may only bind to a loopback address".into());
+        return Err(
+            "LAN binding requires TLS and is not implemented; use a loopback address".into(),
+        );
     }
+
+    let auth = auth::AuthService::load(state_dir.join("devices.json"))?;
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/v1/pair", axum::routing::post(pair_device))
         .route("/v1/ws", get(websocket_upgrade))
         .with_state(AppState {
+            auth: auth.clone(),
             workspace: Arc::new(workspace.clone()),
         });
     let listener = tokio::net::TcpListener::bind(address)
@@ -93,9 +114,16 @@ async fn serve(workspace: PathBuf, bind: &str) -> Result<(), String> {
         .map_err(|error| format!("cannot bind {address}: {error}"))?;
     println!("LiteCode agent listening on ws://{address}/v1/ws");
     println!("Authorized workspace: {}", workspace.display());
-    axum::serve(listener, app)
-        .await
-        .map_err(|error| format!("server failed: {error}"))
+    println!(
+        "Pairing invitation (valid once for 5 minutes): {}",
+        auth.invitation_uri(&format!("http://{address}"))
+    );
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|error| format!("server failed: {error}"))
 }
 
 async fn health() -> &'static str {
@@ -105,8 +133,53 @@ async fn health() -> &'static str {
 async fn websocket_upgrade(
     upgrade: WebSocketUpgrade,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    upgrade.on_upgrade(move |socket| handle_socket(socket, state))
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
+    let credential = bearer_credential(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    if !state.auth.authenticate(credential) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(upgrade.on_upgrade(move |socket| handle_socket(socket, state)))
+}
+
+async fn pair_device(
+    State(state): State<AppState>,
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
+    Json(request): Json<PairDeviceRequest>,
+) -> Result<Json<PairDeviceResponse>, (StatusCode, &'static str)> {
+    if request.protocol_version != PROTOCOL_VERSION {
+        return Err((StatusCode::BAD_REQUEST, "unsupported_protocol_version"));
+    }
+    let paired = state
+        .auth
+        .pair(
+            &source.ip().to_string(),
+            &request.pairing_secret,
+            &request.device_name,
+        )
+        .map_err(|code| {
+            let status = if code == "pairing_rate_limited" {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::UNAUTHORIZED
+            };
+            (status, code)
+        })?;
+    Ok(Json(PairDeviceResponse {
+        protocol_version: PROTOCOL_VERSION,
+        agent_id: paired.agent_id,
+        device_id: paired.device_id,
+        device_credential: paired.credential,
+    }))
+}
+
+fn bearer_credential(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .filter(|value| !value.is_empty())
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
@@ -302,11 +375,34 @@ fn print_status() {
     println!("version: {}", env!("CARGO_PKG_VERSION"));
     println!("protocol: {PROTOCOL_VERSION}");
     println!("platform: {}", std::env::consts::OS);
-    println!("state: local-demo-ready");
+    println!("state: authenticated-loopback-ready");
 }
 
 fn print_help() {
     println!("Usage:");
     println!("  litecode-agent status");
-    println!("  litecode-agent serve --workspace <PATH> [--bind 127.0.0.1:47831]");
+    println!(
+        "  litecode-agent serve --workspace <PATH> [--bind 127.0.0.1:47831] [--state-dir <PATH>]"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bearer_header_requires_the_expected_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer credential".parse().expect("valid header"),
+        );
+        assert_eq!(bearer_credential(&headers), Some("credential"));
+
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Basic credential".parse().expect("valid header"),
+        );
+        assert_eq!(bearer_credential(&headers), None);
+    }
 }

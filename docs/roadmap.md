@@ -16,7 +16,7 @@ Exit criteria: Rust checks pass locally and in CI; Flutter checks pass in CI.
 ## M1 - Local vertical slice
 
 - [x] Agent startup configuration with one authorized workspace.
-- [ ] Authenticated local WebSocket session.
+- [x] Authenticated local WebSocket session.
 - [x] Fixed loopback connection from Flutter for desktop validation.
 - [x] Start a supervised Codex task and stream structured events.
 - [ ] Reconnect and replay missed events.

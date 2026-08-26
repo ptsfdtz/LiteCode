@@ -19,10 +19,18 @@ M1 - Local vertical slice
 - Added the loopback WebSocket Agent and structured JSON command/event transport.
 - Added supervised `codex exec` streaming with a startup-authorized workspace.
 - Verified Flutter -> Agent -> Codex end to end with exact file-content validation.
+- Added a stable Agent identity and persistent hashed device registry.
+- Added a five-minute, single-use pairing invitation and rate-limited pairing endpoint.
+- Required a valid device bearer credential before WebSocket upgrade while retaining
+  the loopback-only bind restriction.
+- Accepted the QR pairing, TLS pinning, device credential, and revocation design in
+  ADR-0003.
 
 ## Current focus
 
-- Replace the fixed loopback connection with pairing and authenticated transport.
+- Add mobile QR scanning and platform-secure credential storage for the implemented
+  pairing exchange.
+- Add TLS certificate generation and QR fingerprint pinning before enabling LAN bind.
 - Add durable task events and reconnect replay.
 
 ## Blockers
@@ -31,7 +39,8 @@ M1 - Local vertical slice
 
 ## Next actions
 
-1. Design pairing, device identity, and authenticated transport in a new ADR.
-2. Add host-side workspace configuration and capability discovery.
-3. Implement reconnect/event replay behavior.
-4. Add explicit task cancellation and approval handling.
+1. Implement the Flutter QR pairing flow and secure device credential storage.
+2. Add Agent TLS identity, certificate fingerprint pinning, and revocation commands.
+3. Add host-side workspace configuration and capability discovery.
+4. Implement reconnect/event replay behavior.
+5. Add explicit task cancellation and approval handling.

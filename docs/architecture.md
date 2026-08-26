@@ -29,9 +29,11 @@ files directly and does not need to understand Codex-specific terminal formattin
 Owns network sessions, authentication, task lifecycle, persistence, and process
 supervision. It continues running tasks when the phone disconnects.
 
-The current M1 slice provides `GET /health` and a WebSocket endpoint at `/v1/ws`. Its
-server rejects non-loopback bind addresses until pairing and transport authentication
-are implemented.
+The current M1 slice provides `GET /health`, a one-time pairing exchange at
+`POST /v1/pair`, and a bearer-authenticated WebSocket endpoint at `/v1/ws`. It owns a
+stable Agent ID and a hashed device registry. The server still rejects non-loopback
+bind addresses until TLS identity, certificate pinning, mobile secure storage, and
+device revocation are implemented.
 
 ### Core library
 
@@ -71,15 +73,17 @@ and platform-specific paths behind narrow interfaces.
 
 ```text
 Flutter Windows client
-  -> ws://127.0.0.1:47831/v1/ws
+  -> one-time loopback pairing at http://127.0.0.1:47831/v1/pair
+  -> authenticated ws://127.0.0.1:47831/v1/ws
   -> Rust agent with one startup-authorized workspace
   -> codex exec --json --ephemeral --sandbox workspace-write
   -> structured task events returned to Flutter
 ```
 
-This slice validates component boundaries and process streaming. It does not claim the
-pairing, authentication, persistence, approval, or reconnect guarantees planned for the
-networked MVP.
+This slice validates component boundaries, process streaming, host identity, one-time
+pairing, and upgrade authentication. It does not claim encrypted LAN transport, mobile
+QR handling, secure platform credential storage, revocation, task persistence,
+approval, or reconnect guarantees planned for the networked MVP.
 
 ## Planned dependency direction
 

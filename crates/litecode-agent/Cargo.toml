@@ -7,10 +7,15 @@ rust-version.workspace = true
 
 [dependencies]
 axum = { version = "0.8.4", features = ["ws"] }
+base64.workspace = true
 futures-util.workspace = true
 litecode-core = { path = "../litecode-core" }
 litecode-protocol = { path = "../litecode-protocol" }
+rand.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 tokio.workspace = true
 
 [lints]

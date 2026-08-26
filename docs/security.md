@@ -29,9 +29,27 @@
 - Agent logs record security-relevant actions without recording secret values.
 - Rate limits apply to pairing and authentication failures.
 
+## Selected identity and pairing model
+
+- An Agent installation has a stable, random, non-secret agent ID.
+- A host-initiated QR invitation carries the agent ID, endpoint, TLS certificate
+  fingerprint, and a random single-use secret that expires after five minutes.
+- The pairing endpoint consumes the secret and issues a random device ID and bearer
+  credential. The Agent persists only the credential hash.
+- Every WebSocket upgrade requires `Authorization: Bearer <device credential>` and
+  rejects missing, invalid, or revoked credentials before accepting commands.
+- LAN pairing and sessions require TLS with the QR-provided certificate fingerprint
+  pinned by the client. Plain `http` and `ws` are permitted only on loopback.
+- Pairing failures are limited to five attempts per source per minute. Secrets and
+  credentials must never appear in logs.
+
+The mechanism and rollout constraints are recorded in ADR-0003.
+
 ## Local development exception
 
-The M1 development slice is unauthenticated and therefore enforces all of the following:
+The initial M1 development slice was unauthenticated. The Agent now implements
+one-time pairing and authenticated WebSocket upgrades, but still enforces all of the
+following until TLS and mobile credential storage are complete:
 
 - binds only to an IP loopback address;
 - accepts only workspace ID `local` and tool ID `codex`;
@@ -39,8 +57,9 @@ The M1 development slice is unauthenticated and therefore enforces all of the fo
 - starts Codex with `workspace-write` sandboxing and ephemeral session storage;
 - is not suitable for LAN or public network exposure.
 
-Removing the loopback restriction requires pairing, authenticated transport, device
-revocation, and an accepted ADR for the selected mechanisms.
+Removing the loopback restriction requires TLS with certificate pinning, mobile QR
+pairing and secure credential storage, working device revocation, and transport-level
+integration tests.
 
 ## Explicit non-goals for the MVP
 
@@ -48,10 +67,10 @@ revocation, and an accepted ADR for the selected mechanisms.
 - Sandboxing the AI CLI beyond its native sandbox and approval model.
 - Secure public internet relay.
 
-## Open security decisions
+## Open security work
 
-- Device identity and certificate lifecycle.
-- Host credential-store abstraction.
+- Certificate generation, rotation, and platform credential-store abstractions.
+- Device listing and revocation UX plus active-session invalidation.
 - Exact approval risk classification.
 - Task event retention and secure deletion policy.
 

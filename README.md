@@ -37,7 +37,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-### Local end-to-end demo
+### Authenticated loopback Agent
 
 Create an isolated workspace, then start the loopback-only agent:
 
@@ -46,15 +46,15 @@ New-Item -ItemType Directory -Force test-workspaces/e2e
 cargo run -p litecode-agent -- serve --workspace test-workspaces/e2e
 ```
 
-In a second terminal, start the Windows Flutter client:
+Startup prints a single-use `litecode://pair` invitation. Exchange its secret at
+`POST /v1/pair`, then supply the returned device credential as an
+`Authorization: Bearer` header when opening `/v1/ws`. The endpoint rejects
+unauthenticated upgrades.
 
-```powershell
-cd apps/mobile
-flutter run -d windows
-```
-
-The current vertical slice deliberately listens only on `127.0.0.1`. It is suitable
-for local development, not for LAN or internet exposure.
+The Flutter pairing screen and secure credential storage are the next client slice;
+the previous fixed unauthenticated Flutter connection is intentionally no longer
+accepted. The Agent still listens only on `127.0.0.1` because TLS and certificate
+pinning are required before LAN use.
 
 ### Flutter app
 

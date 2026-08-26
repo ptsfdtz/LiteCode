@@ -8,6 +8,23 @@ use serde::{Deserialize, Serialize};
 pub const PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairDeviceRequest {
+    pub protocol_version: u16,
+    pub pairing_secret: String,
+    pub device_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairDeviceResponse {
+    pub protocol_version: u16,
+    pub agent_id: String,
+    pub device_id: String,
+    pub device_credential: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct TaskId(String);
 
@@ -123,5 +140,20 @@ mod tests {
 
         assert!(json.contains(r#""type":"create_task""#));
         assert!(json.contains(r#""task_id":"task-1""#));
+    }
+
+    #[test]
+    fn pairing_request_uses_camel_case_fields() {
+        let request = PairDeviceRequest {
+            protocol_version: PROTOCOL_VERSION,
+            pairing_secret: "one-time-secret".into(),
+            device_name: "Test phone".into(),
+        };
+
+        let json = serde_json::to_string(&request).expect("serializes pairing request");
+
+        assert!(json.contains(r#""protocolVersion":1"#));
+        assert!(json.contains(r#""pairingSecret":"one-time-secret""#));
+        assert!(json.contains(r#""deviceName":"Test phone""#));
     }
 }

@@ -2,13 +2,14 @@
 
 ## Status
 
-Draft for protocol version 1. Rust types define the domain vocabulary and serialize to
-JSON on the implemented local WebSocket slice.
+Draft for protocol version 1. Rust types define task messages and the pairing exchange.
+The implemented loopback slice authenticates WebSocket upgrades; TLS and mobile QR
+handling are not yet implemented, so non-loopback binding remains prohibited.
 
 ## Transport
 
 - Local discovery: mDNS with a non-sensitive agent identifier.
-- Local demo session: unauthenticated WebSocket restricted to the loopback interface.
+- Local development session: bearer-authenticated WebSocket restricted to loopback.
 - Networked session target: authenticated WebSocket over TLS after device pairing.
 - Encoding: JSON for the MVP.
 - Compatibility: every envelope includes a protocol version.
@@ -20,6 +21,31 @@ envelopes, message identifiers, and replay sequences remain required before LAN 
 
 Events additionally include `taskId` and a monotonically increasing `sequence` when
 they belong to a task.
+
+## Pairing invitation
+
+The QR payload uses the `litecode://pair` URI scheme and contains:
+
+| Field | Purpose |
+| --- | --- |
+| `agent` | Stable, non-secret Agent installation ID |
+| `endpoint` | URL-safe base64 encoded HTTPS origin |
+| `fingerprint` | SHA-256 fingerprint of the Agent TLS certificate |
+| `secret` | Random, single-use pairing secret valid for five minutes |
+
+The current loopback implementation omits `fingerprint` and advertises an HTTP origin.
+Clients must reject that form for a non-loopback endpoint.
+
+## Pairing exchange
+
+`POST /v1/pair` accepts JSON with `protocolVersion`, `pairingSecret`, and `deviceName`.
+On success it returns `protocolVersion`, `agentId`, `deviceId`, and
+`deviceCredential`. The credential appears only in this response and subsequent
+`Authorization: Bearer` headers; it is never included in WebSocket message bodies.
+
+Errors use HTTP status `400` for protocol incompatibility, `401` for an invalid or used
+invitation, and `429` for a rate-limited source. Error bodies contain stable codes and
+never echo supplied values.
 
 ## Client commands
 
@@ -46,4 +72,5 @@ they belong to a task.
 - Unknown optional fields are ignored.
 - Unknown message types receive an `unsupported_message` error.
 - Breaking schema or semantic changes increment `protocolVersion`.
-- Secrets, environment values, and raw credentials are never protocol payloads.
+- Pairing secrets occur only in the one-time pairing request. Device credentials,
+  environment values, and other secrets are never WebSocket message payloads.
