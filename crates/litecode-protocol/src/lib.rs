@@ -105,6 +105,10 @@ pub enum AgentEvent {
         sequence: u64,
         summary: String,
     },
+    TaskStopped {
+        task_id: TaskId,
+        sequence: u64,
+    },
     TaskFailed {
         task_id: TaskId,
         sequence: u64,
@@ -182,6 +186,19 @@ mod tests {
     }
 
     #[test]
+    fn send_input_uses_the_wire_contract() {
+        let command = ClientCommand::SendInput {
+            task_id: TaskId::new("task-1").expect("valid task id"),
+            input: "Focus on tests".into(),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&command).expect("serializes command"),
+            r#"{"type":"send_input","task_id":"task-1","input":"Focus on tests"}"#
+        );
+    }
+
+    #[test]
     fn task_events_include_their_sequence() {
         let event = AgentEvent::TaskStarted {
             task_id: TaskId::new("task-1").expect("valid task id"),
@@ -191,5 +208,18 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serializes event");
 
         assert!(json.contains(r#""sequence":1"#));
+    }
+
+    #[test]
+    fn task_stopped_uses_the_wire_contract() {
+        let event = AgentEvent::TaskStopped {
+            task_id: TaskId::new("task-1").expect("valid task id"),
+            sequence: 4,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&event).expect("serializes event"),
+            r#"{"type":"task_stopped","task_id":"task-1","sequence":4}"#
+        );
     }
 }

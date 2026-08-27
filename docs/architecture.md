@@ -49,6 +49,22 @@ event capture alive through a temporary client disconnect. Flutter reconnects wi
 bounded backoff, requests the missing sequence range, buffers out-of-order arrivals,
 and suppresses duplicates. Restart persistence is not part of this slice.
 
+An Agent-owned in-memory task supervisor registers each spawned Codex process by task
+ID. Authenticated `stop_task` commands signal only the matching process. Registration
+also records stopping and terminal states, making unknown, repeated, and late Stop
+requests safe no-ops. Process termination publishes one `task_stopped` terminal event
+through the same live and retained event store. Supervisor and cancellation state are
+not persisted across Agent restarts.
+
+The Codex adapter now supervises one stdio `codex app-server` process per LiteCode task.
+It initializes an ephemeral thread rooted at the startup-authorized workspace, starts
+one turn, normalizes streamed app-server items into retained task output, and maps
+`send_input` to `turn/steer` and Stop to `turn/interrupt`. The supervisor control
+channel is task-ID-scoped and survives Flutter disconnects while the Agent remains
+running. Ephemeral threads are not written to Codex session storage. The same
+bidirectional adapter boundary will carry explicit approval requests and decisions in
+the next slice.
+
 ### Core library
 
 Contains platform-independent workspace and task rules. It does not depend on network,
@@ -90,16 +106,17 @@ Flutter Windows client
   -> one-time loopback pairing at http://127.0.0.1:47831/v1/pair
   -> authenticated ws://127.0.0.1:47831/v1/ws
   -> Rust agent with one startup-authorized workspace
-  -> codex exec --json --ephemeral --sandbox workspace-write
+  -> codex app-server --stdio with an ephemeral workspace-write thread
   -> structured task events returned to Flutter
 ```
 
 This slice validates component boundaries, process streaming, host identity, one-time
 pairing, upgrade authentication, encrypted LAN transport, mobile QR handling, secure
 client credential storage, a local host pairing interface, and revocation of new
-sessions. It now provides reconnect and replay guarantees while the Agent process
-remains running. It does not yet provide device management UI, mDNS, active-session
-invalidation, restart persistence, approval, or cancellation.
+sessions. It now provides reconnect and replay guarantees plus explicit task
+cancellation while the Agent process remains running. It does not yet provide device
+management UI, mDNS, active-session invalidation, restart persistence, or approval
+handling.
 
 ## Planned dependency direction
 

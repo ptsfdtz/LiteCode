@@ -28,8 +28,9 @@ Exit criteria: a phone can run and reconnect to a mock task without losing outpu
 - [ ] Detect Codex CLI and report capability.
 - [x] Start Codex in an authorized workspace.
 - [x] Stream normalized task state and Codex JSONL output.
-- [ ] Send follow-up input.
-- [ ] Resolve approvals and stop the task.
+- [x] Send follow-up input to a running turn.
+- [x] Stop a running task explicitly.
+- [ ] Resolve approvals.
 - [ ] Show task summary and changed files.
 
 Exit criteria: the complete MVP journey works on the primary development platform.

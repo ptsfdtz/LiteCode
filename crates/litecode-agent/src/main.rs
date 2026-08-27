@@ -25,7 +25,7 @@ use litecode_protocol::{
     AgentEvent, ClientCommand, PROTOCOL_VERSION, PairDeviceRequest, PairDeviceResponse, TaskId,
 };
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
     sync::mpsc,
 };
@@ -41,6 +41,94 @@ struct AppState {
     tls_enabled: bool,
     fingerprint: Option<Arc<str>>,
     task_events: TaskEventStore,
+    tasks: TaskSupervisor,
+}
+
+#[derive(Clone, Default)]
+struct TaskSupervisor {
+    inner: Arc<Mutex<HashMap<String, SupervisedTask>>>,
+}
+
+enum SupervisedTask {
+    Active(mpsc::UnboundedSender<TaskControl>),
+    Stopping,
+    Finished,
+}
+
+enum TaskControl {
+    SendInput(String),
+    Stop,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StopTaskResult {
+    Requested,
+    AlreadyRequested,
+    AlreadyFinished,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SendInputResult {
+    Sent,
+    NotRunning,
+    Unknown,
+}
+
+impl TaskSupervisor {
+    fn register(&self, task_id: &TaskId) -> Option<mpsc::UnboundedReceiver<TaskControl>> {
+        let mut tasks = self.inner.lock().expect("task supervisor mutex poisoned");
+        if tasks.contains_key(task_id.as_str()) {
+            return None;
+        }
+        let (sender, receiver) = mpsc::unbounded_channel();
+        tasks.insert(task_id.as_str().to_owned(), SupervisedTask::Active(sender));
+        Some(receiver)
+    }
+
+    fn stop(&self, task_id: &TaskId) -> StopTaskResult {
+        let mut tasks = self.inner.lock().expect("task supervisor mutex poisoned");
+        let Some(task) = tasks.get_mut(task_id.as_str()) else {
+            return StopTaskResult::Unknown;
+        };
+        match task {
+            SupervisedTask::Active(sender) => {
+                let _ = sender.send(TaskControl::Stop);
+                *task = SupervisedTask::Stopping;
+                StopTaskResult::Requested
+            }
+            SupervisedTask::Stopping => StopTaskResult::AlreadyRequested,
+            SupervisedTask::Finished => StopTaskResult::AlreadyFinished,
+        }
+    }
+
+    fn send_input(&self, task_id: &TaskId, input: String) -> SendInputResult {
+        let tasks = self.inner.lock().expect("task supervisor mutex poisoned");
+        let Some(task) = tasks.get(task_id.as_str()) else {
+            return SendInputResult::Unknown;
+        };
+        match task {
+            SupervisedTask::Active(sender) => {
+                if sender.send(TaskControl::SendInput(input)).is_ok() {
+                    SendInputResult::Sent
+                } else {
+                    SendInputResult::NotRunning
+                }
+            }
+            SupervisedTask::Stopping | SupervisedTask::Finished => SendInputResult::NotRunning,
+        }
+    }
+
+    fn finish(&self, task_id: &TaskId) {
+        if let Some(task) = self
+            .inner
+            .lock()
+            .expect("task supervisor mutex poisoned")
+            .get_mut(task_id.as_str())
+        {
+            *task = SupervisedTask::Finished;
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -109,7 +197,187 @@ fn event_sequence(event: &AgentEvent) -> u64 {
         | AgentEvent::OutputDelta { sequence, .. }
         | AgentEvent::ApprovalRequired { sequence, .. }
         | AgentEvent::TaskCompleted { sequence, .. }
+        | AgentEvent::TaskStopped { sequence, .. }
         | AgentEvent::TaskFailed { sequence, .. } => *sequence,
+    }
+}
+
+enum AppServerAction {
+    Send(Vec<serde_json::Value>),
+    Terminal(AppServerTerminal),
+    None,
+}
+
+enum AppServerTerminal {
+    Completed,
+    Stopped,
+    Failed(String),
+}
+
+struct AppServerSession {
+    prompt: Option<String>,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    queued_inputs: Vec<String>,
+    next_request_id: u64,
+    interrupt_requested: bool,
+}
+
+impl AppServerSession {
+    fn new(prompt: String) -> Self {
+        Self {
+            prompt: Some(prompt),
+            thread_id: None,
+            turn_id: None,
+            queued_inputs: Vec::new(),
+            next_request_id: 3,
+            interrupt_requested: false,
+        }
+    }
+
+    fn handle_message(
+        &mut self,
+        line: &str,
+        task_id: &TaskId,
+        events: &TaskEventStore,
+    ) -> AppServerAction {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            return AppServerAction::None;
+        };
+        if let Some(error) = message.get("error") {
+            let detail = error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown app-server error");
+            return AppServerAction::Terminal(AppServerTerminal::Failed(format!(
+                "Codex protocol error: {detail}"
+            )));
+        }
+        if message.get("id").and_then(serde_json::Value::as_u64) == Some(1) {
+            return self.handle_thread_started_response(&message);
+        }
+        let method = message
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        match method {
+            "turn/started" => self.handle_turn_started(&message),
+            "turn/completed" => Self::handle_turn_completed(&message),
+            "item/agentMessage/delta" => {
+                if let Some(delta) = message.pointer("/params/delta").and_then(|v| v.as_str()) {
+                    publish_output(task_id, events, delta.to_owned());
+                }
+                AppServerAction::None
+            }
+            "item/started" | "item/completed" => {
+                if let Some(item) = message.pointer("/params/item") {
+                    let output = serde_json::json!({"type": method, "item": item});
+                    publish_output(task_id, events, output.to_string());
+                }
+                AppServerAction::None
+            }
+            _ => AppServerAction::None,
+        }
+    }
+
+    fn handle_thread_started_response(&mut self, message: &serde_json::Value) -> AppServerAction {
+        let Some(thread_id) = message
+            .pointer("/result/thread/id")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return AppServerAction::Terminal(AppServerTerminal::Failed(
+                "Codex did not return a thread ID".into(),
+            ));
+        };
+        self.thread_id = Some(thread_id.to_owned());
+        let prompt = self.prompt.take().unwrap_or_default();
+        AppServerAction::Send(vec![serde_json::json!({
+            "method": "turn/start",
+            "id": 2,
+            "params": {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": prompt}]
+            }
+        })])
+    }
+
+    fn handle_turn_started(&mut self, message: &serde_json::Value) -> AppServerAction {
+        let Some(turn_id) = message
+            .pointer("/params/turn/id")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return AppServerAction::None;
+        };
+        self.turn_id = Some(turn_id.to_owned());
+        if self.interrupt_requested {
+            return self
+                .interrupt_message()
+                .map_or(AppServerAction::None, |message| {
+                    AppServerAction::Send(vec![message])
+                });
+        }
+        let queued = std::mem::take(&mut self.queued_inputs);
+        AppServerAction::Send(
+            queued
+                .into_iter()
+                .filter_map(|input| self.steer_message(&input))
+                .collect(),
+        )
+    }
+
+    fn handle_turn_completed(message: &serde_json::Value) -> AppServerAction {
+        match message
+            .pointer("/params/turn/status")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("completed") => AppServerAction::Terminal(AppServerTerminal::Completed),
+            Some("interrupted") => AppServerAction::Terminal(AppServerTerminal::Stopped),
+            Some("failed") => {
+                AppServerAction::Terminal(AppServerTerminal::Failed("Codex turn failed".into()))
+            }
+            _ => AppServerAction::None,
+        }
+    }
+
+    fn steer(&mut self, input: String) -> Option<serde_json::Value> {
+        if self.turn_id.is_none() {
+            self.queued_inputs.push(input);
+            return None;
+        }
+        self.steer_message(&input)
+    }
+
+    fn steer_message(&mut self, input: &str) -> Option<serde_json::Value> {
+        let thread_id = self.thread_id.as_ref()?;
+        let turn_id = self.turn_id.as_ref()?;
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        Some(serde_json::json!({
+            "method": "turn/steer",
+            "id": request_id,
+            "params": {
+                "threadId": thread_id,
+                "expectedTurnId": turn_id,
+                "input": [{"type": "text", "text": input}]
+            }
+        }))
+    }
+
+    fn interrupt(&mut self) -> Option<serde_json::Value> {
+        self.interrupt_requested = true;
+        self.interrupt_message()
+    }
+
+    fn interrupt_message(&mut self) -> Option<serde_json::Value> {
+        let thread_id = self.thread_id.as_ref()?;
+        let turn_id = self.turn_id.as_ref()?;
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        Some(serde_json::json!({
+            "method": "turn/interrupt",
+            "id": request_id,
+            "params": {"threadId": thread_id, "turnId": turn_id}
+        }))
     }
 }
 
@@ -260,6 +528,7 @@ async fn serve(
             tls_enabled: true,
             fingerprint: Some(identity.fingerprint.clone().into()),
             task_events: TaskEventStore::default(),
+            tasks: TaskSupervisor::default(),
         });
         println!("LiteCode agent listening on {endpoint}/v1/ws");
         println!("Pairing interface: {endpoint}/pairing (available from this computer only)");
@@ -284,6 +553,7 @@ async fn serve(
             tls_enabled: false,
             fingerprint: None,
             task_events: TaskEventStore::default(),
+            tasks: TaskSupervisor::default(),
         });
         println!("LiteCode agent listening on {endpoint}/v1/ws");
         println!("Pairing interface: {endpoint}/pairing");
@@ -420,11 +690,24 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 tool,
                 prompt,
             }) if workspace_id == "local" && tool == "codex" && !prompt.trim().is_empty() => {
-                let workspace = Arc::clone(&state.workspace);
-                let events = state.task_events.clone();
-                tokio::spawn(async move {
-                    run_codex(task_id, prompt, workspace.as_ref(), events).await;
-                });
+                if let Some(controls) = state.tasks.register(&task_id) {
+                    let workspace = Arc::clone(&state.workspace);
+                    let events = state.task_events.clone();
+                    let tasks = state.tasks.clone();
+                    tokio::spawn(async move {
+                        run_codex(task_id, prompt, workspace.as_ref(), events, tasks, controls)
+                            .await;
+                    });
+                } else {
+                    let event_task_id = task_id.clone();
+                    state
+                        .task_events
+                        .publish(&task_id, |sequence| AgentEvent::TaskFailed {
+                            task_id: event_task_id,
+                            sequence,
+                            message: "task ID has already been used".into(),
+                        });
+                }
             }
             Ok(ClientCommand::CreateTask { task_id, .. }) => {
                 let event_task_id = task_id.clone();
@@ -446,6 +729,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                 }
             }
+            Ok(ClientCommand::StopTask { task_id }) => {
+                let _ = state.tasks.stop(&task_id);
+            }
+            Ok(ClientCommand::SendInput { task_id, input }) if !input.trim().is_empty() => {
+                let _ = state.tasks.send_input(&task_id, input);
+            }
             Ok(_) => {}
             Err(error) => {
                 let Ok(task_id) = TaskId::new("invalid-command") else {
@@ -466,7 +755,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let _ = writer.await;
 }
 
-async fn run_codex(task_id: TaskId, prompt: String, workspace: &PathBuf, events: TaskEventStore) {
+async fn run_codex(
+    task_id: TaskId,
+    prompt: String,
+    workspace: &Path,
+    events: TaskEventStore,
+    tasks: TaskSupervisor,
+    controls: mpsc::UnboundedReceiver<TaskControl>,
+) {
     let event_task_id = task_id.clone();
     events.publish(&task_id, |sequence| AgentEvent::TaskStarted {
         task_id: event_task_id,
@@ -475,17 +771,8 @@ async fn run_codex(task_id: TaskId, prompt: String, workspace: &PathBuf, events:
 
     let mut command = codex_command();
     let child = command
-        .args([
-            "exec",
-            "--json",
-            "--ephemeral",
-            "--sandbox",
-            "workspace-write",
-            "--skip-git-repo-check",
-            "-C",
-        ])
-        .arg(workspace)
-        .arg(prompt)
+        .args(["app-server", "--stdio"])
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -499,70 +786,207 @@ async fn run_codex(task_id: TaskId, prompt: String, workspace: &PathBuf, events:
             sequence,
             message: format!("could not start Codex: {error}"),
         });
+        tasks.finish(&task_id);
         return;
     };
 
+    let Some(mut stdin) = child.stdin.take() else {
+        publish_task_failure(&task_id, &events, "Codex stdin is unavailable".into());
+        tasks.finish(&task_id);
+        return;
+    };
     let Some(stdout) = child.stdout.take() else {
+        publish_task_failure(&task_id, &events, "Codex stdout is unavailable".into());
+        tasks.finish(&task_id);
         return;
     };
     let Some(stderr) = child.stderr.take() else {
+        publish_task_failure(&task_id, &events, "Codex stderr is unavailable".into());
+        tasks.finish(&task_id);
         return;
     };
+    let workspace = workspace.to_string_lossy();
+    let initialize = serde_json::json!({
+        "method": "initialize",
+        "id": 0,
+        "params": {"clientInfo": {
+            "name": "litecode",
+            "title": "LiteCode",
+            "version": env!("CARGO_PKG_VERSION")
+        }}
+    });
+    let initialized = serde_json::json!({"method": "initialized", "params": {}});
+    let start_thread = serde_json::json!({
+        "method": "thread/start",
+        "id": 1,
+        "params": {
+            "cwd": workspace,
+            "approvalPolicy": "never",
+            "sandbox": "workspace-write",
+            "ephemeral": true,
+            "serviceName": "litecode"
+        }
+    });
+    if send_rpc(&mut stdin, &initialize).await.is_err()
+        || send_rpc(&mut stdin, &initialized).await.is_err()
+        || send_rpc(&mut stdin, &start_thread).await.is_err()
+    {
+        publish_task_failure(&task_id, &events, "could not initialize Codex".into());
+        let _ = child.kill().await;
+        tasks.finish(&task_id);
+        return;
+    }
+
+    let terminal = drive_app_server(
+        child,
+        stdin,
+        stdout,
+        stderr,
+        controls,
+        AppServerSession::new(prompt),
+        &task_id,
+        &events,
+    )
+    .await;
+    publish_app_server_terminal(&task_id, &events, terminal);
+    tasks.finish(&task_id);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_app_server(
+    mut child: tokio::process::Child,
+    mut stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    mut controls: mpsc::UnboundedReceiver<TaskControl>,
+    mut session: AppServerSession,
+    task_id: &TaskId,
+    events: &TaskEventStore,
+) -> AppServerTerminal {
     let mut stdout_lines = BufReader::new(stdout).lines();
     let mut stderr_lines = BufReader::new(stderr).lines();
-    let stdout_task_id = task_id.clone();
-    let stdout_events = events.clone();
-    let stdout_task = tokio::spawn(async move {
-        while let Ok(Some(line)) = stdout_lines.next_line().await {
-            let event_task_id = stdout_task_id.clone();
-            stdout_events.publish(&stdout_task_id, |sequence| AgentEvent::OutputDelta {
-                task_id: event_task_id,
-                sequence,
-                text: line,
-            });
+    let terminal = loop {
+        tokio::select! {
+            line = stdout_lines.next_line() => {
+                match line {
+                    Ok(Some(line)) => {
+                        match session.handle_message(&line, task_id, events) {
+                            AppServerAction::Send(messages) => {
+                                if send_rpc_messages(&mut stdin, messages).await.is_err() {
+                                    break AppServerTerminal::Failed("could not send input to Codex".into());
+                                }
+                            }
+                            AppServerAction::Terminal(terminal) => break terminal,
+                            AppServerAction::None => {}
+                        }
+                    }
+                    Ok(None) => break AppServerTerminal::Failed("Codex closed unexpectedly".into()),
+                    Err(error) => break AppServerTerminal::Failed(format!("could not read Codex output: {error}")),
+                }
+            }
+            line = stderr_lines.next_line() => {
+                if let Ok(Some(line)) = line {
+                    publish_output(task_id, events, format!("stderr: {line}"));
+                }
+            }
+            control = controls.recv() => {
+                match control {
+                    Some(TaskControl::SendInput(input)) => {
+                        if let Some(message) = session.steer(input) {
+                            if send_rpc(&mut stdin, &message).await.is_err() {
+                                break AppServerTerminal::Failed("could not send follow-up input".into());
+                            }
+                        }
+                    }
+                    Some(TaskControl::Stop) => {
+                        if let Some(message) = session.interrupt() {
+                            if send_rpc(&mut stdin, &message).await.is_err() {
+                                break AppServerTerminal::Stopped;
+                            }
+                        } else {
+                            break AppServerTerminal::Stopped;
+                        }
+                    }
+                    None => break AppServerTerminal::Failed("task control channel closed".into()),
+                }
+            }
+            status = child.wait() => {
+                break match status {
+                    Ok(status) => AppServerTerminal::Failed(format!("Codex exited with {status}")),
+                    Err(error) => AppServerTerminal::Failed(format!("failed to wait for Codex: {error}")),
+                };
+            }
         }
-    });
-    let stderr_task_id = task_id.clone();
-    let stderr_events = events.clone();
-    let stderr_task = tokio::spawn(async move {
-        while let Ok(Some(line)) = stderr_lines.next_line().await {
-            let event_task_id = stderr_task_id.clone();
-            stderr_events.publish(&stderr_task_id, |sequence| AgentEvent::OutputDelta {
-                task_id: event_task_id,
-                sequence,
-                text: format!("stderr: {line}"),
-            });
-        }
-    });
+    };
+    let _ = child.kill().await;
+    terminal
+}
 
-    let status = child.wait().await;
-    let _ = tokio::join!(stdout_task, stderr_task);
-    match status {
-        Ok(status) if status.success() => {
-            let event_task_id = task_id.clone();
-            events.publish(&task_id, |sequence| AgentEvent::TaskCompleted {
+async fn send_rpc(
+    stdin: &mut tokio::process::ChildStdin,
+    message: &serde_json::Value,
+) -> std::io::Result<()> {
+    stdin.write_all(message.to_string().as_bytes()).await?;
+    stdin.write_all(b"\n").await?;
+    stdin.flush().await
+}
+
+async fn send_rpc_messages(
+    stdin: &mut tokio::process::ChildStdin,
+    messages: Vec<serde_json::Value>,
+) -> std::io::Result<()> {
+    for message in messages {
+        send_rpc(stdin, &message).await?;
+    }
+    Ok(())
+}
+
+fn publish_app_server_terminal(
+    task_id: &TaskId,
+    events: &TaskEventStore,
+    terminal: AppServerTerminal,
+) {
+    let event_task_id = task_id.clone();
+    match terminal {
+        AppServerTerminal::Completed => {
+            events.publish(task_id, |sequence| AgentEvent::TaskCompleted {
                 task_id: event_task_id,
                 sequence,
                 summary: "Codex completed successfully".into(),
             });
         }
-        Ok(status) => {
-            let event_task_id = task_id.clone();
-            events.publish(&task_id, |sequence| AgentEvent::TaskFailed {
+        AppServerTerminal::Stopped => {
+            events.publish(task_id, |sequence| AgentEvent::TaskStopped {
                 task_id: event_task_id,
                 sequence,
-                message: format!("Codex exited with {status}"),
             });
         }
-        Err(error) => {
-            let event_task_id = task_id.clone();
-            events.publish(&task_id, |sequence| AgentEvent::TaskFailed {
+        AppServerTerminal::Failed(message) => {
+            events.publish(task_id, |sequence| AgentEvent::TaskFailed {
                 task_id: event_task_id,
                 sequence,
-                message: format!("failed to wait for Codex: {error}"),
+                message,
             });
         }
     }
+}
+
+fn publish_task_failure(task_id: &TaskId, events: &TaskEventStore, message: String) {
+    let event_task_id = task_id.clone();
+    events.publish(task_id, |sequence| AgentEvent::TaskFailed {
+        task_id: event_task_id,
+        sequence,
+        message,
+    });
+}
+
+fn publish_output(task_id: &TaskId, events: &TaskEventStore, text: String) {
+    let event_task_id = task_id.clone();
+    events.publish(task_id, |sequence| AgentEvent::OutputDelta {
+        task_id: event_task_id,
+        sequence,
+        text,
+    });
 }
 
 fn codex_command() -> Command {
@@ -631,6 +1055,7 @@ mod tests {
             tls_enabled: false,
             fingerprint: None,
             task_events: TaskEventStore::default(),
+            tasks: TaskSupervisor::default(),
         };
         (app_router(state), path)
     }
@@ -699,6 +1124,132 @@ mod tests {
 
         assert_eq!(replay.len(), 1);
         assert_eq!(event_sequence(&replay[0]), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_task_signals_only_that_task() {
+        let tasks = TaskSupervisor::default();
+        let first = TaskId::new("task-first").expect("valid task id");
+        let second = TaskId::new("task-second").expect("valid task id");
+        let mut first_controls = tasks.register(&first).expect("registers first task");
+        let mut second_controls = tasks.register(&second).expect("registers second task");
+
+        assert_eq!(tasks.stop(&first), StopTaskResult::Requested);
+        assert!(matches!(
+            first_controls.recv().await,
+            Some(TaskControl::Stop)
+        ));
+        assert!(matches!(
+            second_controls.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn cancellation_is_safe_for_unknown_repeated_and_finished_tasks() {
+        let tasks = TaskSupervisor::default();
+        let unknown = TaskId::new("task-unknown").expect("valid task id");
+        assert_eq!(tasks.stop(&unknown), StopTaskResult::Unknown);
+
+        let running = TaskId::new("task-running").expect("valid task id");
+        let _cancellation = tasks.register(&running).expect("registers task");
+        assert_eq!(tasks.stop(&running), StopTaskResult::Requested);
+        assert_eq!(tasks.stop(&running), StopTaskResult::AlreadyRequested);
+
+        let completed = TaskId::new("task-completed").expect("valid task id");
+        let _cancellation = tasks.register(&completed).expect("registers task");
+        tasks.finish(&completed);
+        assert_eq!(tasks.stop(&completed), StopTaskResult::AlreadyFinished);
+    }
+
+    #[test]
+    fn cancellation_terminal_event_is_sequenced_and_replayable() {
+        let store = TaskEventStore::default();
+        let task_id = TaskId::new("task-stopped").expect("valid task id");
+        let started_task_id = task_id.clone();
+        store.publish(&task_id, |sequence| AgentEvent::TaskStarted {
+            task_id: started_task_id,
+            sequence,
+        });
+        let stopped_task_id = task_id.clone();
+        store.publish(&task_id, |sequence| AgentEvent::TaskStopped {
+            task_id: stopped_task_id,
+            sequence,
+        });
+
+        let replay = store.replay(&task_id, 1);
+        assert_eq!(replay.len(), 1);
+        assert!(matches!(
+            replay[0],
+            AgentEvent::TaskStopped { sequence: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn follow_up_input_is_routed_only_to_the_running_task() {
+        let tasks = TaskSupervisor::default();
+        let first = TaskId::new("task-first").expect("valid task id");
+        let second = TaskId::new("task-second").expect("valid task id");
+        let mut first_controls = tasks.register(&first).expect("registers first task");
+        let mut second_controls = tasks.register(&second).expect("registers second task");
+
+        assert_eq!(
+            tasks.send_input(&second, "focus on tests".into()),
+            SendInputResult::Sent
+        );
+        assert!(matches!(
+            second_controls.try_recv(),
+            Ok(TaskControl::SendInput(input)) if input == "focus on tests"
+        ));
+        assert!(matches!(
+            first_controls.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn follow_up_input_is_rejected_for_unknown_stopping_and_finished_tasks() {
+        let tasks = TaskSupervisor::default();
+        let unknown = TaskId::new("task-unknown").expect("valid task id");
+        assert_eq!(
+            tasks.send_input(&unknown, "input".into()),
+            SendInputResult::Unknown
+        );
+
+        let task_id = TaskId::new("task-known").expect("valid task id");
+        let _controls = tasks.register(&task_id).expect("registers task");
+        assert_eq!(tasks.stop(&task_id), StopTaskResult::Requested);
+        assert_eq!(
+            tasks.send_input(&task_id, "too late".into()),
+            SendInputResult::NotRunning
+        );
+        tasks.finish(&task_id);
+        assert_eq!(
+            tasks.send_input(&task_id, "still too late".into()),
+            SendInputResult::NotRunning
+        );
+    }
+
+    #[test]
+    fn app_server_session_maps_thread_start_and_follow_up_input() {
+        let store = TaskEventStore::default();
+        let task_id = TaskId::new("task-app-server").expect("valid task id");
+        let mut session = AppServerSession::new("initial prompt".into());
+        let thread_response = r#"{"id":1,"result":{"thread":{"id":"thread-1"}}}"#;
+        let AppServerAction::Send(messages) =
+            session.handle_message(thread_response, &task_id, &store)
+        else {
+            panic!("thread response should start a turn");
+        };
+        assert_eq!(messages[0]["method"], "turn/start");
+        assert_eq!(messages[0]["params"]["input"][0]["text"], "initial prompt");
+
+        let turn_started = r#"{"method":"turn/started","params":{"turn":{"id":"turn-1"}}}"#;
+        let _ = session.handle_message(turn_started, &task_id, &store);
+        let steer = session.steer("follow up".into()).expect("steer request");
+        assert_eq!(steer["method"], "turn/steer");
+        assert_eq!(steer["params"]["expectedTurnId"], "turn-1");
+        assert_eq!(steer["params"]["input"][0]["text"], "follow up");
     }
 
     #[tokio::test]

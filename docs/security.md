@@ -52,7 +52,20 @@
   user profile directory ACL until the platform credential-store abstraction lands.
 - Task replay is available only inside an already bearer-authenticated WebSocket
   session. The Agent retains replayable task prompts and output in process memory; it
-  does not write them to disk in this slice, and clears them when the process exits.
+  does not write them to disk in this slice, and clears them when the Agent process
+  exits.
+- `stop_task` is accepted only over the same bearer-authenticated WebSocket as other
+  task commands. The Agent resolves the supplied task ID through its in-memory
+  supervisor and terminates only that task. Unknown, repeated, and already-terminal
+  cancellation requests are no-ops and do not affect other processes.
+- Disconnecting a client never implies cancellation. Cancellation state and its
+  replayable terminal event remain in memory only and are cleared by an Agent restart.
+- Each task starts a Codex app-server stdio child and an ephemeral thread. LiteCode sets
+  the authorized workspace as `cwd`, retains `workspace-write` sandboxing, and keeps
+  approval policy at `never` until explicit mobile approval handling is implemented.
+  Follow-up text is accepted only over an authenticated WebSocket and routed only to
+  the matching active task's in-memory control channel. App-server threads are not
+  materialized in Codex session storage.
 
 The mechanism and rollout constraints are recorded in ADR-0003.
 

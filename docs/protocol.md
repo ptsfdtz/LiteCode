@@ -80,7 +80,7 @@ after repeated authentication failures from the same source.
 | `create_task` | Start a task in an authorized workspace with a selected tool |
 | `send_input` | Add follow-up input to a running task |
 | `resolve_approval` | Approve once or reject a pending operation |
-| `stop_task` | Request graceful task termination |
+| `stop_task` | Terminate the identified running task |
 | `resume_events` | Replay task events after a known sequence |
 
 `resume_events` contains `task_id` and `after_sequence`. The Agent returns retained
@@ -91,6 +91,18 @@ sequence order. An unknown task or a cursor at the latest event produces no even
 The current Agent retains task events only in memory. Temporary WebSocket disconnects
 do not stop the task or lose events, but restarting the Agent clears replay history.
 
+`stop_task` contains `task_id`. The Agent terminates only the active supervised process
+registered for that ID. The command is idempotent: an unknown task ID, a repeated
+request, or a request after terminal completion has no effect and produces no extra
+terminal event. A disconnect does not send or imply `stop_task`.
+
+`send_input` contains `task_id` and non-empty `input`. It is accepted only while the
+identified task has an active Codex turn and maps to app-server `turn/steer`; it does
+not create a shell or bypass workspace authorization. Unknown, stopping, completed,
+and failed tasks ignore the command. Follow-up input sent before Codex reports the turn
+ID is queued in memory and steered after `turn/started`. A disconnect does not discard
+the task or its control channel.
+
 ## Agent events
 
 | Event | Purpose |
@@ -99,7 +111,12 @@ do not stop the task or lose events, but restarting the Agent clears replay hist
 | `output_delta` | Streams displayable task output |
 | `approval_required` | Requests an explicit mobile decision |
 | `task_completed` | Reports a successful terminal state and summary |
+| `task_stopped` | Reports that explicit cancellation terminated the task |
 | `task_failed` | Reports a failure and safe diagnostic message |
+
+`task_stopped` is a terminal task event with the same per-task sequence and retention
+rules as every other task event. It may therefore arrive live, through `resume_events`
+replay, or through both paths; clients apply normal ordering and duplicate suppression.
 
 ## Compatibility rules
 

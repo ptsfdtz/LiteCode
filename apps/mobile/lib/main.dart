@@ -305,6 +305,8 @@ class _ScannerPageState extends State<_ScannerPage> {
 
 enum AgentConnection { connecting, reconnecting, connected, disconnected }
 
+enum TaskOutcome { completed, cancelled }
+
 class TaskHomePage extends StatefulWidget {
   const TaskHomePage({
     super.key,
@@ -328,6 +330,7 @@ class _TaskHomePageState extends State<TaskHomePage> {
         'Flutter -> Agent -> Codex works',
   );
   final _outputController = ScrollController();
+  final _followUpController = TextEditingController();
   final List<String> _output = <String>[];
   WebSocket? _socket;
   StreamSubscription<dynamic>? _subscription;
@@ -336,6 +339,8 @@ class _TaskHomePageState extends State<TaskHomePage> {
   int _reconnectAttempt = 0;
   bool _connecting = false;
   bool _running = false;
+  bool _cancellationPending = false;
+  TaskOutcome? _outcome;
   String? _error;
   String? _activeTaskId;
   final OrderedEventBuffer _eventBuffer = OrderedEventBuffer();
@@ -397,6 +402,14 @@ class _TaskHomePageState extends State<TaskHomePage> {
             'after_sequence': _eventBuffer.lastSequence,
           }),
         );
+        if (_cancellationPending) {
+          socket.add(
+            jsonEncode(<String, dynamic>{
+              'type': 'stop_task',
+              'task_id': activeTaskId,
+            }),
+          );
+        }
       }
     } on Object catch (error) {
       if (!mounted) return;
@@ -453,6 +466,7 @@ class _TaskHomePageState extends State<TaskHomePage> {
       case 'task_started':
         setState(() {
           _running = true;
+          _outcome = null;
           _error = null;
           _output.add('Task started');
         });
@@ -462,11 +476,21 @@ class _TaskHomePageState extends State<TaskHomePage> {
       case 'task_completed':
         setState(() {
           _running = false;
+          _cancellationPending = false;
+          _outcome = TaskOutcome.completed;
           _output.add(event['summary'] as String? ?? 'Task completed');
+        });
+      case 'task_stopped':
+        setState(() {
+          _running = false;
+          _cancellationPending = false;
+          _outcome = TaskOutcome.cancelled;
+          _output.add('Task cancelled');
         });
       case 'task_failed':
         setState(() {
           _running = false;
+          _cancellationPending = false;
           _error = event['message'] as String? ?? 'Task failed';
         });
     }
@@ -521,9 +545,48 @@ class _TaskHomePageState extends State<TaskHomePage> {
     );
     setState(() {
       _running = true;
+      _cancellationPending = false;
+      _outcome = null;
       _error = null;
       _output.clear();
       _output.add('Request sent to Codex');
+    });
+  }
+
+  void _stopTask() {
+    final taskId = _activeTaskId;
+    if (!_running ||
+        _cancellationPending ||
+        _connection != AgentConnection.connected ||
+        taskId == null) {
+      return;
+    }
+    _socket?.add(
+      jsonEncode(<String, dynamic>{'type': 'stop_task', 'task_id': taskId}),
+    );
+    setState(() => _cancellationPending = true);
+  }
+
+  void _sendFollowUp() {
+    final taskId = _activeTaskId;
+    final input = _followUpController.text.trim();
+    if (!_running ||
+        _cancellationPending ||
+        _connection != AgentConnection.connected ||
+        taskId == null ||
+        input.isEmpty) {
+      return;
+    }
+    _socket?.add(
+      jsonEncode(<String, dynamic>{
+        'type': 'send_input',
+        'task_id': taskId,
+        'input': input,
+      }),
+    );
+    setState(() {
+      _followUpController.clear();
+      _output.add('Follow-up sent');
     });
   }
 
@@ -533,6 +596,7 @@ class _TaskHomePageState extends State<TaskHomePage> {
     unawaited(_subscription?.cancel());
     unawaited(_socket?.close());
     _promptController.dispose();
+    _followUpController.dispose();
     _outputController.dispose();
     super.dispose();
   }
@@ -586,32 +650,31 @@ class _TaskHomePageState extends State<TaskHomePage> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: SizedBox(
-                      width: 132,
-                      height: 44,
-                      child: FilledButton.icon(
-                        onPressed:
-                            _connection == AgentConnection.connected &&
-                                !_running
-                            ? _runTask
-                            : null,
-                        icon: _running
-                            ? const SizedBox.square(
-                                dimension: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.play_arrow_rounded),
-                        label: Text(_running ? 'Running' : 'Run task'),
-                      ),
-                    ),
+                  TaskActionControl(
+                    connected: _connection == AgentConnection.connected,
+                    running: _running,
+                    cancellationPending: _cancellationPending,
+                    onRun: _runTask,
+                    onStop: _stopTask,
                   ),
+                  if (_running) ...[
+                    const SizedBox(height: 12),
+                    FollowUpControl(
+                      controller: _followUpController,
+                      enabled:
+                          _connection == AgentConnection.connected &&
+                          !_cancellationPending,
+                      onChanged: (_) => setState(() {}),
+                      onSend: _sendFollowUp,
+                    ),
+                  ],
                   if (_error != null) ...[
                     const SizedBox(height: 12),
                     _ErrorBanner(message: _error!),
+                  ],
+                  if (_outcome != null) ...[
+                    const SizedBox(height: 12),
+                    TaskOutcomeBanner(outcome: _outcome!),
                   ],
                   const SizedBox(height: 20),
                   const Text(
@@ -655,6 +718,109 @@ class _TaskHomePageState extends State<TaskHomePage> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class TaskActionControl extends StatelessWidget {
+  const TaskActionControl({
+    super.key,
+    required this.connected,
+    required this.running,
+    required this.cancellationPending,
+    required this.onRun,
+    required this.onStop,
+  });
+
+  final bool connected;
+  final bool running;
+  final bool cancellationPending;
+  final VoidCallback onRun;
+  final VoidCallback onStop;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: SizedBox(
+        width: 132,
+        height: 44,
+        child: FilledButton.icon(
+          onPressed: connected && !cancellationPending
+              ? (running ? onStop : onRun)
+              : null,
+          icon: cancellationPending
+              ? const SizedBox.square(
+                  dimension: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(running ? Icons.stop_rounded : Icons.play_arrow_rounded),
+          label: Text(
+            cancellationPending ? 'Stopping' : (running ? 'Stop' : 'Run task'),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class FollowUpControl extends StatelessWidget {
+  const FollowUpControl({
+    super.key,
+    required this.controller,
+    required this.enabled,
+    required this.onChanged,
+    required this.onSend,
+  });
+
+  final TextEditingController controller;
+  final bool enabled;
+  final ValueChanged<String> onChanged;
+  final VoidCallback onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    final canSend = enabled && controller.text.trim().isNotEmpty;
+    return TextField(
+      controller: controller,
+      enabled: enabled,
+      minLines: 1,
+      maxLines: 3,
+      textInputAction: TextInputAction.send,
+      onChanged: onChanged,
+      onSubmitted: canSend ? (_) => onSend() : null,
+      decoration: InputDecoration(
+        labelText: 'Follow-up',
+        suffixIcon: IconButton(
+          tooltip: 'Send follow-up',
+          onPressed: canSend ? onSend : null,
+          icon: const Icon(Icons.send_rounded),
+        ),
+      ),
+    );
+  }
+}
+
+class TaskOutcomeBanner extends StatelessWidget {
+  const TaskOutcomeBanner({super.key, required this.outcome});
+
+  final TaskOutcome outcome;
+
+  @override
+  Widget build(BuildContext context) {
+    final cancelled = outcome == TaskOutcome.cancelled;
+    return Semantics(
+      liveRegion: true,
+      child: Row(
+        children: [
+          Icon(
+            cancelled ? Icons.cancel_outlined : Icons.check_circle_outline,
+            size: 20,
+          ),
+          const SizedBox(width: 8),
+          Text(cancelled ? 'Task cancelled' : 'Task completed'),
+        ],
       ),
     );
   }

@@ -37,10 +37,15 @@ M1 - Local vertical slice
 - Added protocol version 2 task-event sequencing, Agent-side in-memory event retention,
   `resume_events` replay, and Flutter automatic reconnect with bounded backoff,
   duplicate suppression, and actionable connection errors.
+- Added task-ID-scoped process supervision and idempotent `stop_task` cancellation with
+  a sequenced, replayable `task_stopped` terminal event and Flutter Stop states.
+- Migrated supervised Codex execution to ephemeral stdio app-server threads and added
+  running-turn follow-up input through `send_input`/`turn/steer`, with focused Flutter
+  input states and task-ID-scoped Agent routing.
 
 ## Current focus
 
-- Add follow-up task input, cancellation, and approval handling.
+- Add approval handling on the Codex app-server request/response channel.
 - Add mDNS discovery and invalidate active sessions immediately after device revocation.
 
 ## Blockers
@@ -49,7 +54,7 @@ M1 - Local vertical slice
 
 ## Next actions
 
-1. Add explicit follow-up input, task cancellation, and approval handling.
+1. Add explicit approval handling.
 2. Add host-side workspace configuration and capability discovery.
 3. Add mDNS discovery and active-session revocation.
 4. Persist task state and events across Agent restarts.
